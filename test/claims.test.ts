@@ -28,7 +28,7 @@ const daysAgo = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOStr
 const settings: ClaimSettings = { ...DEFAULT_CLAIM_SETTINGS, enabled: true };
 
 function line(p: Partial<OrderLine> & Pick<OrderLine, "id" | "title" | "quantity" | "unitAmount" | "productId">): OrderLine {
-  return { variantTitle: null, image: null, requiresShipping: true, giftCard: false, productType: null, vendor: null, tags: [], ...p };
+  return { variantTitle: null, image: null, variantId: null, requiresShipping: true, giftCard: false, productType: null, vendor: null, tags: [], ...p };
 }
 
 const order = (patch: Partial<ClaimOrder> = {}): ClaimOrder => ({

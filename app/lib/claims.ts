@@ -131,6 +131,7 @@ export interface OrderLine {
   unitAmount: number;
   image: string | null;
   productId: string | null; // gid://shopify/Product/…
+  variantId: string | null; // gid://shopify/ProductVariant/… (null if deleted)
   requiresShipping: boolean;
   giftCard: boolean;
   productType: string | null;
@@ -299,3 +300,57 @@ export const pathnameAllowed = (pathname: string, shop: string, orderId: string)
   !pathname.includes("..") &&
   /^[\w./@-]+$/.test(pathname) &&
   pathname.length < 300;
+
+// ---- Carrying out a resolution (phase 2) ----
+
+export const RESOLUTION_KINDS = ["REFUND", "REPLACEMENT", "STORE_CREDIT", "MANUAL"] as const;
+export type ResolutionKind = (typeof RESOLUTION_KINDS)[number];
+export const isResolutionKind = (s: unknown): s is ResolutionKind => RESOLUTION_KINDS.includes(s as ResolutionKind);
+
+export const RESOLUTION_KIND_LABELS: Record<ResolutionKind, string> = {
+  REFUND: "Refund to the original payment",
+  REPLACEMENT: "Replacement order (free)",
+  STORE_CREDIT: "Store credit",
+  MANUAL: "Handled outside the app (record the cost)",
+};
+
+/** The approval's resolution → the action offered first. */
+export const defaultKind = (r: Resolution | null): ResolutionKind =>
+  r === "REFUND" ? "REFUND" : r === "REPLACEMENT" ? "REPLACEMENT" : r === "STORE_CREDIT" ? "STORE_CREDIT" : "MANUAL";
+
+/** Optional scopes each action needs (granted on first use). */
+export const KIND_SCOPES: Record<ResolutionKind, string[]> = {
+  REFUND: [],
+  REPLACEMENT: ["write_draft_orders"],
+  STORE_CREDIT: ["write_store_credit_account_transactions"],
+  MANUAL: [],
+};
+
+export interface RefundSource {
+  parentId: string;
+  gateway: string;
+  /** Presentment currency, major units. */
+  max: number;
+}
+
+/**
+ * Split a refund over the order's payments, in the order Shopify suggests,
+ * never more than each can take. null if the amount is more than they hold.
+ * Amounts are rounded to cents per transaction; the last one takes the rest.
+ */
+export function allocateRefund(sources: RefundSource[], amount: number): { parentId: string; gateway: string; amount: number }[] | null {
+  const cents = Math.round(amount * 100);
+  if (!(cents > 0)) return null;
+  const total = sources.reduce((s, t) => s + Math.round(t.max * 100), 0);
+  if (cents > total) return null;
+  const out: { parentId: string; gateway: string; amount: number }[] = [];
+  let left = cents;
+  for (const t of sources) {
+    if (left <= 0) break;
+    const take = Math.min(left, Math.round(t.max * 100));
+    if (take <= 0) continue;
+    out.push({ parentId: t.parentId, gateway: t.gateway, amount: take / 100 });
+    left -= take;
+  }
+  return out;
+}

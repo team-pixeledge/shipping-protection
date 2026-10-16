@@ -1,5 +1,6 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
+import { parsePeriod, programResults } from "../lib/program.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
@@ -7,34 +8,20 @@ import { EMBED_HANDLE, embedStatus } from "../lib/embed.server";
 import { parseSettings } from "../lib/settings";
 import { ensureShop } from "../lib/shop.server";
 
-const DAYS = 30;
-
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
-  const since = new Date(Date.now() - DAYS * 86_400_000);
+  const days = parsePeriod(new URL(request.url).searchParams.get("days"));
 
-  const [embed, totals, protectedTotals, recent, claimCounts] = await Promise.all([
+  const [embed, results, recent] = await Promise.all([
     embedStatus(admin),
-    prisma.orderRecord.count({ where: { shop: shop.shop, orderedAt: { gte: since } } }),
-    prisma.orderRecord.aggregate({
-      where: { shop: shop.shop, orderedAt: { gte: since }, protected: true },
-      _count: true,
-      _sum: { fee: true },
-    }),
+    programResults(shop.shop, days),
     prisma.orderRecord.findMany({
       where: { shop: shop.shop, protected: true },
       orderBy: { orderedAt: "desc" },
       take: 10,
     }),
-    prisma.claim.groupBy({
-      by: ["status"],
-      where: { shop: shop.shop, createdAt: { gte: since } },
-      _count: true,
-      _sum: { amount: true },
-    }),
   ]);
-  const claimsBy = (s: string) => claimCounts.find((c) => c.status === s);
 
   const apiKey = process.env.SHOPIFY_API_KEY || "";
   const configured = shop.settings !== null && shop.syncedVersion > 0;
@@ -48,19 +35,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     embed,
     embedUrl: `shopify://admin/themes/current/editor?context=apps&activateAppId=${apiKey}/${EMBED_HANDLE}`,
     blockUrl: `shopify://admin/themes/current/editor?template=cart&addAppBlockId=${apiKey}/cart-protection&target=newAppsSection`,
-    stats: {
-      orders: totals,
-      protected: protectedTotals._count,
-      revenue: Number(protectedTotals._sum.fee ?? 0),
-    },
-    claims: {
-      enabled: configured && parseSettings(shop.settings).claims.enabled,
-      received: claimCounts.reduce((s, c) => s + c._count, 0),
-      pending: (claimsBy("OPEN")?._count ?? 0) + (claimsBy("NEEDS_INFO")?._count ?? 0),
-      approved: claimsBy("APPROVED")?._count ?? 0,
-      rejected: claimsBy("REJECTED")?._count ?? 0,
-      approvedValue: Number(claimsBy("APPROVED")?._sum.amount ?? 0),
-    },
+    days,
+    results,
+    claimsEnabled: configured && parseSettings(shop.settings).claims.enabled,
     recent: recent.map((r) => ({
       id: r.orderId,
       name: r.orderName,
@@ -75,7 +52,7 @@ export default function Home() {
   const d = useLoaderData<typeof loader>();
   const money = (n: number, currency = d.currency) =>
     new Intl.NumberFormat(undefined, { style: "currency", currency }).format(n);
-  const rate = d.stats.orders ? Math.round((d.stats.protected / d.stats.orders) * 100) : 0;
+  const r = d.results;
 
   const steps: { done: boolean; title: string; body: React.ReactNode }[] = [
     {
@@ -145,22 +122,48 @@ export default function Home() {
         </s-stack>
       </s-section>
 
-      <s-section heading={`Last ${DAYS} days`}>
-        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(160px, 1fr))" gap="base">
-          <Stat label="Protected orders" value={String(d.stats.protected)} />
-          <Stat label="Attach rate" value={d.stats.orders ? `${rate}%` : "—"} hint={`of ${d.stats.orders} orders`} />
-          <Stat label="Protection revenue" value={money(d.stats.revenue)} />
-        </s-grid>
+      <s-section heading="Program results">
+        <s-stack direction="block" gap="base">
+          <s-stack direction="inline" gap="small-200">
+            {PERIOD_LABELS.map(([n, label]) => (
+              <s-button key={n} href={`/app?days=${n}`} variant={d.days === n ? "primary" : "secondary"}>
+                {label}
+              </s-button>
+            ))}
+          </s-stack>
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(160px, 1fr))" gap="base">
+            <Stat label="Protection fees collected" value={money(r.fees)} hint={`${r.protectedOrders} protected orders`} />
+            <Stat label="Attach rate" value={r.attachRate === null ? "—" : `${Math.round(r.attachRate * 100)}%`} hint={`of ${r.orders} orders`} />
+            <Stat
+              label="Claim costs"
+              value={money(r.claimCost)}
+              hint={r.lossRatio === null ? undefined : `${Math.round(r.lossRatio * 100)}% of fees`}
+            />
+            <Stat label="Net from protection" value={money(r.net)} hint="Fees minus claim costs" />
+          </s-grid>
+          {Object.keys(r.costBy).length > 0 && (
+            <s-text color="subdued">
+              Claim costs:{" "}
+              {Object.entries(r.costBy)
+                .map(([type, c]) => `${COST_LABELS[type] ?? type} ${money(c.amount)} (${c.count})`)
+                .join(" · ")}
+            </s-text>
+          )}
+          <s-text color="subdued">
+            Not profit: payment processing fees, app charges and taxes on the fee aren&apos;t included. Replacement
+            costs are what you entered when creating them.
+          </s-text>
+        </s-stack>
       </s-section>
 
-      <s-section heading={`Claims, last ${DAYS} days`}>
-        {d.claims.enabled || d.claims.received > 0 ? (
+      <s-section heading="Claims">
+        {d.claimsEnabled || r.claims.received > 0 ? (
           <s-stack direction="block" gap="base">
             <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
-              <Stat label="Received" value={String(d.claims.received)} />
-              <Stat label="Waiting on you or the customer" value={String(d.claims.pending)} />
-              <Stat label="Approved" value={String(d.claims.approved)} hint={`${money(d.claims.approvedValue)} claimed`} />
-              <Stat label="Rejected" value={String(d.claims.rejected)} />
+              <Stat label="Received" value={String(r.claims.received)} />
+              <Stat label="Waiting on you or the customer" value={String(r.claims.pending)} />
+              <Stat label="Approved" value={String(r.claims.approved)} />
+              <Stat label="Rejected" value={String(r.claims.rejected)} />
             </s-grid>
             <s-link href="/app/claims">Review claims</s-link>
           </s-stack>
@@ -230,6 +233,19 @@ export default function Home() {
     </s-page>
   );
 }
+
+const PERIOD_LABELS: [number, string][] = [
+  [30, "30 days"],
+  [90, "90 days"],
+  [365, "12 months"],
+  [0, "All time"],
+];
+const COST_LABELS: Record<string, string> = {
+  REFUND: "Refunds",
+  REPLACEMENT: "Replacements",
+  STORE_CREDIT: "Store credit",
+  MANUAL: "Handled outside the app",
+};
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (

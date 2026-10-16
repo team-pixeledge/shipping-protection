@@ -147,6 +147,46 @@ Phase 1 records a resolution but doesn't carry it out.
   deletes the shop's whole blob prefix.
 - `Shop.portalPath` is learnt from each proxy request (`path_prefix`), so
   links stay right if the merchant renames the subpath.
+- **Phase 2, resolutions (added 2026-10-16):**
+  - **Approving vs carrying out.** Approving records `Claim.resolution`;
+    carrying out goes through `resolveClaim` and creates a
+    `ClaimResolution` row.
+  - **Each claim is resolved at most once:**
+    - `lock` is a conditional update of `Claim.resolutionLock` inside a
+      transaction, so a double click or two staff members can't both
+      resolve it.
+    - `refundCreate` carries `@idempotent(key: claim-refund-<row id>)`,
+      which Shopify **requires** as of 2026-04.
+    - On success the row becomes DONE and `Claim.resolvedAt` is set. On
+      failure it becomes FAILED and the lock is released.
+    - An attempt stuck in PROCESSING for more than 5 minutes can be
+      cleared by staff after checking Shopify (`clearStuck`). It's never
+      retried automatically: a new attempt gets a new idempotency key.
+  - **Resolved claims can't be reopened.** The action and the UI both
+    check `resolvedAt`.
+  - **Refund:** `suggestedRefund` for the claimed lines with NO_RESTOCK,
+    split across payments by `allocateRefund`. A custom amount is money
+    only (no `refundLineItems`). The recorded cost is Shopify's
+    `totalRefundedSet.shopMoney`.
+  - **Replacement:** `draftOrderCreateFromOrder` → `draftOrderUpdate`
+    (claimed variants, 100% discount, shipping at 0, tagged) →
+    `draftOrderComplete`. The merchant enters the cost.
+  - **Store credit:** `storeCreditAccountCredit` on the order's customer,
+    in the shop currency.
+  - **Optional scopes** (`optional_scopes` in toml, NOT in the `SCOPES`
+    env) are requested from the claim page through App Bridge
+    `shopify.scopes.request`.
+  - **The customer sees only what they got.** There's a public RESOLVED
+    event and an email. The cost note is an internal event.
+  - **Program results** (`program.server.ts`) are fees from OrderRecord
+    minus DONE resolution amounts, all in the shop currency. The page
+    labels them "not profit". The CSV (`/app/claims/export`) is fetched
+    by script (App Bridge adds the token) and has a formula-injection
+    guard.
+  - **DB tests** (`test/resolutions.db.test.ts`) need `TEST_DATABASE_URL`.
+    They passed on 2026-10-16 against PGlite (pglite-server,
+    `connection_limit=1`) because Docker was down, so the "simultaneous"
+    case ran serially there. Re-run on real Postgres.
 - Verified over HTTP against a local build (signed proxy requests, a fake
   offline session): pages render, Liquid is neutralised, internal notes are
   hidden, forged or wrong-purpose tokens get 404, the reply flow works,
@@ -176,6 +216,6 @@ Phase 1 records a resolution but doesn't carry it out.
 - Plus stores: optional Cart Transform `lineUpdate` for exact % pricing.
 - Excluded products (not counted in the subtotal), per-market fixed prices,
   checkout UI extension toggle (Plus-only steps).
-- Claims phases 2–4 (see the Claims section). Also: a translated claims
+- Claims phases 3–4 (tracking and risk; analytics and A/B testing). Also: a translated claims
   page, cleanup of orphan uploads, and lookup rate limiting.
 - Staging app + `shopify.app.staging.toml` before launch.

@@ -1,5 +1,7 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useState } from "react";
 import { useLoaderData, useSearchParams } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
@@ -59,6 +61,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 export default function Claims() {
   const d = useLoaderData<typeof loader>();
   const [params] = useSearchParams();
+  const shopify = useAppBridge();
   const money = (n: number, c: string) => new Intl.NumberFormat(undefined, { style: "currency", currency: c }).format(n);
   const link = (patch: Record<string, string | null>) => {
     const p = new URLSearchParams(params);
@@ -67,9 +70,34 @@ export default function Claims() {
     return `/app/claims${q ? `?${q}` : ""}`;
   };
   const total = Object.values(d.counts).reduce((s, n) => s + (n ?? 0), 0);
+  const [exporting, setExporting] = useState(false);
+  const exportCsv = async (days: number) => {
+    setExporting(true);
+    try {
+      // App Bridge adds the session token to this same-origin fetch.
+      const res = await fetch(`/app/claims/export?days=${days}`);
+      if (!res.ok) throw new Error(String(res.status));
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (res.headers.get("Content-Disposition") ?? "").match(/filename="([^"]+)"/)?.[1] ?? "claims.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      shopify.toast.show("Export failed — try again", { isError: true });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <s-page heading="Claims">
+      <s-button slot="secondary-actions" onClick={() => exportCsv(365)} {...(exporting ? { loading: true } : {})}>
+        Export last 12 months (CSV)
+      </s-button>
+      <s-button slot="secondary-actions" onClick={() => exportCsv(0)}>
+        Export all (CSV)
+      </s-button>
       {!d.enabled && (
         <s-banner tone="info" heading="The claims page is off">
           Customers can&apos;t file claims online yet. Turn it on in{" "}

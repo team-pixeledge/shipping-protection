@@ -25,6 +25,13 @@ the cart, on every Shopify plan.
   store's own domain (`/apps/safeship/claims`), with photos. The merchant
   reviews it in the app (approve with a resolution, reject, or ask for more
   information), and both sides get emails at each step.
+- **Resolving claims from the app:** an approved claim can be refunded to
+  the original payment, replaced with a free order, paid as store credit,
+  or recorded as handled outside the app. Each claim is resolved at most
+  once.
+- **Program results:** on Home, fees collected against claim costs (net and
+  loss ratio) for 30 days, 90 days, 12 months or all time, plus a CSV export
+  of claims.
 
 ## How it works
 
@@ -80,8 +87,18 @@ Admin → Claims ─────────────────────
   and is under the claims-per-order limit. A damage claim needs a photo.
 - Flags such as "marked delivered but reported lost" are hints for the
   merchant. A claim is never approved or rejected automatically.
-- Approving records a resolution: refund, replacement, store credit or
-  other. The merchant still carries it out in Shopify.
+- **Approving and carrying out are separate steps.** Approving records the
+  intended resolution. Carrying it out (`app/lib/resolutions.server.ts`)
+  then does one of these:
+  - Refunds the claimed items through `refundCreate` (no restock, carrying
+    an idempotency key), or a custom amount as money only.
+  - Creates a free order for the claimed items, from the original order.
+  - Issues store credit.
+  - Records a cost for something handled outside the app.
+- **Replacements and store credit need optional permissions**
+  (`write_draft_orders`, `write_store_credit_account_transactions`). The
+  merchant grants them the first time they use the feature.
+- **A resolved claim can't be reopened.**
 
 ## Setup
 
@@ -194,7 +211,8 @@ locally (`react-router-serve`, Prisma), point `DATABASE_URL` and
 ## Checks
 
 ```bash
-npm test              # 84 tests: pricing, coverage, function, orders, embed detection, widget (jsdom), claims
+npm test              # 89 tests (+5 database tests, skipped without TEST_DATABASE_URL)
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:55451/shipping_protection npx vitest run test/resolutions.db.test.ts
 npm run typecheck
 npm run lint
 cd extensions/protection-validation && npx shopify app function build
@@ -231,12 +249,17 @@ cd extensions/protection-validation && npx shopify app function build
 - **Claims page is English only.** The emails are English too.
 - **Order lookup sees only the last 60 days of orders.** Older orders need the
   `read_all_orders` scope, which Shopify approves separately.
-- **Resolutions aren't carried out by the app.** Approving records "refund",
-  "replacement" and so on; the merchant issues it in Shopify. That's phase 2.
+- **Program results aren't profit.** Payment fees, app charges and tax on
+  the fee aren't included. A replacement's cost is whatever the merchant
+  enters, defaulting to the items' sale value.
+- **A refund made directly in Shopify isn't picked up.** Use "handled
+  outside the app" to record its cost.
+- **A replacement order ships to the original address.** To change it, edit
+  the new order in Shopify.
 - **No rate limit on order lookups.** Guessing needs both the order number
   and its email.
 - **Uploads that are never submitted stay in Blob storage.** They're deleted
   on customer or shop redaction, but there's no other cleanup yet.
-- **Not built yet:** billing, excluded products, per-market fixed prices,
-  tracking sync and fraud rules (phase 3), claim analytics and CSV export
+- **Not built yet:** billing, per-market fixed prices, tracking sync and
+  fraud rules (phase 3), and A/B tests, widget analytics and charts
   (phase 4).

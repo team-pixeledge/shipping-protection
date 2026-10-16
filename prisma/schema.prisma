@@ -122,12 +122,19 @@ model Claim {
   // Phase 1 only records the decision; the merchant carries it out in Shopify.
   resolution  String?
   decidedAt   DateTime?
+  // Set when the resolution was carried out (a ClaimResolution is DONE).
+  // A resolved claim can't be reopened: money or goods have moved.
+  resolvedAt  DateTime?
+  // The ClaimResolution being carried out right now. Taken with a
+  // conditional update, so two clicks or two staff can't both refund.
+  resolutionLock String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   shopRef Shop         @relation(fields: [shop], references: [shop], onDelete: Cascade)
-  events  ClaimEvent[]
-  files   ClaimFile[]
+  events      ClaimEvent[]
+  files       ClaimFile[]
+  resolutions ClaimResolution[]
 
   @@unique([shop, number])
   @@index([shop, status, createdAt])
@@ -169,4 +176,32 @@ model ClaimFile {
   claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
 
   @@index([claimId])
+}
+
+// Carrying out an approved claim (app/lib/resolutions.server.ts): a refund,
+// a replacement order, store credit, or a cost recorded by hand. amount is
+// what it cost the merchant, in the shop currency — the number the
+// program results (fees collected − claim costs) are built from.
+model ClaimResolution {
+  id          String    @id @default(cuid())
+  claimId     String
+  // REFUND | REPLACEMENT | STORE_CREDIT | MANUAL
+  type        String
+  // PROCESSING | DONE | FAILED
+  status      String    @default("PROCESSING")
+  amount      Decimal   @db.Decimal(12, 2)
+  currency    String
+  // What Shopify created: Refund, DraftOrder→Order, or store-credit
+  // transaction gid; shopifyName is the replacement order's name.
+  shopifyId   String?
+  shopifyName String?
+  note        String?
+  error       String?
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId])
+  @@index([status, completedAt])
 }

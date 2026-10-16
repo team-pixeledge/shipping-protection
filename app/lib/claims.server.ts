@@ -36,6 +36,7 @@ const ORDER_FIELDS = `#graphql
     lineItems(first: 100) {
       nodes {
         id title variantTitle currentQuantity requiresShipping isGiftCard
+        variant { id }
         product { id productType vendor tags }
         discountedUnitPriceAfterAllDiscountsSet { shopMoney { amount } }
         image { url(transform: { maxWidth: 160, maxHeight: 160 }) }
@@ -63,6 +64,7 @@ interface OrderNode {
       currentQuantity: number;
       requiresShipping: boolean;
       isGiftCard: boolean;
+      variant?: { id: string } | null;
       product: { id: string; productType: string | null; vendor: string | null; tags: string[] } | null;
       discountedUnitPriceAfterAllDiscountsSet: { shopMoney: { amount: string } };
       image: { url: string } | null;
@@ -95,6 +97,7 @@ export function toClaimOrder(o: OrderNode): ClaimOrder {
       unitAmount: Number(l.discountedUnitPriceAfterAllDiscountsSet.shopMoney.amount),
       image: l.image?.url ?? null,
       productId: l.product?.id ?? null,
+      variantId: l.variant?.id ?? null,
       requiresShipping: l.requiresShipping,
       giftCard: l.isGiftCard,
       productType: l.product?.productType ?? null,

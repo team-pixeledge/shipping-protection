@@ -225,6 +225,8 @@ export function statusPage(
       const what =
         e.kind === "SUBMITTED"
           ? "Claim filed"
+          : e.kind === "RESOLVED"
+            ? "Resolved"
           : e.kind === "STATUS"
             ? `Status: ${STATUS_LABELS[e.status as ClaimStatus] ?? e.status}`
             : e.kind === "FILES"
