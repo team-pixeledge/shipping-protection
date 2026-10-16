@@ -74,6 +74,62 @@ applies the Vercel preset when `VERCEL=1`; `Dockerfile` for a container).
 - **Uninstall leaves the product** (no token after uninstall). Settings →
   "Remove from store" deletes product, validation and config first.
 
+## Claims (phase 1, added 2026-10-16)
+
+The merchant's 54-item checklist was split into four phases: 1 claims core
+(built), 2 resolutions and money (refund, replacement, store credit through
+the API; net profit), 3 tracking and risk, 4 analytics and A/B testing.
+Phase 1 records a resolution but doesn't carry it out.
+
+- **Storefront page = app proxy** (`[app_proxy]` in shopify.app.toml,
+  subpath `safeship` → `/proxy/*`). Responses are `liquid()` inside the
+  theme, so **every dynamic value goes through `esc()`
+  (`app/lib/portal-pages.ts`), which also escapes `{` and `}`**. Customer
+  text would otherwise run as Liquid. A test checks this.
+- **Forms through the proxy:** `liquid()` adds the trailing slash a proxied
+  POST needs, but only when `action` is the form tag's **last** attribute,
+  with no slash of its own. The script-driven upload endpoint carries its own
+  slash.
+- **No cookies through proxies**, so state travels in HMAC tokens
+  (`claim-token.server.ts`, app secret, bound to the shop):
+  - `order` (2 h, carries the verified email) between lookup and submit.
+  - `claim` (180 days) for the status-page link in emails.
+  - `file` (15 min) for evidence links in the admin, because `<img>` can't
+    send the session token.
+- **Order ownership** is proven by order number plus the order's email, or
+  by `logged_in_customer_id` matching the order's customer. Reading
+  `Order.email` needs **Level 2 protected customer data**. The form
+  re-reads the order on submit (`getOrder`); items and prices come from
+  Shopify, never the request. `read_orders` only sees 60 days.
+- **Evidence:** a private Vercel Blob store (`safeship-claims`, connected to
+  the project). The browser uploads directly with a client token from
+  `/proxy/upload`, which only accepts paths under
+  `claims/<shop>/<orderId>/`. On submit each pathname is re-checked with
+  `head()`; the size and type recorded come from Blob, not the browser.
+  Files are served only through `claim-files.$id` (nosniff, sandbox CSP).
+- **Status machine** `canTransition`: OPEN ↔ NEEDS_INFO → APPROVED/REJECTED,
+  and decided → OPEN (reopen; needs an internal note). Updates are
+  conditional on the status the merchant saw. A customer reply to
+  NEEDS_INFO moves the claim back to OPEN.
+- **Emails** (Resend; `RESEND_API_KEY` + `CLAIMS_EMAIL_FROM`) run after
+  the save, through `afterSave`. A failure (Shopify, Resend or config) is a
+  history entry, never an error the user sees. Every send is logged as an
+  internal `EMAIL` event.
+- **Flags are hints, never verdicts** (`claimFlags`). Nothing is
+  auto-approved, per the merchant's own brief.
+- **GDPR:** claims hold customer data (email, description, files).
+  `customers/redact` deletes matching claims by order ID **or email**,
+  plus their blobs and any orphan uploads for those orders. `shop/redact`
+  deletes the shop's whole blob prefix.
+- `Shop.portalPath` is learnt from each proxy request (`path_prefix`), so
+  links stay right if the merchant renames the subpath.
+- Verified over HTTP against a local build (signed proxy requests, a fake
+  offline session): pages render, Liquid is neutralised, internal notes are
+  hidden, forged or wrong-purpose tokens get 404, the reply flow works,
+  email failures are logged, and redaction by email works. **Not run on the
+  real store yet:** the proxy itself, Blob client uploads through it
+  (CORS), Resend delivery, and Level 2 email access.
+
 ## Verified so far (2026-10-16)
 
 - 47 vitest tests (pricing, function logic, order parsing, embed
@@ -95,5 +151,7 @@ applies the Vercel preset when `VERCEL=1`; `Dockerfile` for a container).
 - Billing (Managed Pricing or usage) — not built; decide plans.
 - Plus stores: optional Cart Transform `lineUpdate` for exact % pricing.
 - Excluded products (not counted in the subtotal), per-market fixed prices,
-  claims portal, checkout UI extension toggle (Plus-only steps).
+  checkout UI extension toggle (Plus-only steps).
+- Claims phases 2–4 (see the Claims section). Also: a translated claims
+  page, cleanup of orphan uploads, and lookup rate limiting.
 - Staging app + `shopify.app.staging.toml` before launch.

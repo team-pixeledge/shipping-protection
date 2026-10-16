@@ -28,6 +28,9 @@ import {
 import { removeFromStore } from "../lib/remove.server";
 import { syncProtection } from "../lib/setup.server";
 import { ensureShop } from "../lib/shop.server";
+import { uploadsConfigured } from "../lib/blob.server";
+import { emailConfigured } from "../lib/email.server";
+import type { ClaimSettings } from "../lib/claims";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -37,6 +40,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     configured: shop.settings !== null && shop.productId !== null,
     currency: shop.currency,
     decimals: currencyDecimals(shop.currency),
+    portalUrl: `https://${shop.shop}${shop.portalPath}/claims`,
+    emailReady: emailConfigured(),
+    uploadsReady: uploadsConfigured(),
   };
 };
 
@@ -97,6 +103,7 @@ export default function SettingsPage() {
     if (d.ok && d.intent === "remove") shopify.toast.show("Removed from your store");
   }, [fetcher.data, shopify]);
 
+  const setClaims = (patch: Partial<ClaimSettings>) => setS({ ...s, claims: { ...s.claims, ...patch } });
   const setRules = (patch: Partial<PricingRules>) => setS({ ...s, rules: { ...s.rules, ...patch } });
   const setTier = (i: number, patch: Partial<Tier>) =>
     setRules({ tiers: s.rules.tiers.map((t, j) => (j === i ? { ...t, ...patch } : t)) });
@@ -361,6 +368,82 @@ export default function SettingsPage() {
           checked={s.taxable}
           onChange={(e) => setS({ ...s, taxable: e.currentTarget.checked })}
         />
+      </s-section>
+
+      <s-section heading="Claims">
+        <s-stack direction="block" gap="base">
+          <s-checkbox
+            label="Let customers file claims on my store"
+            details="Customers report a lost, stolen or damaged package; you review it under Claims."
+            checked={s.claims.enabled}
+            onChange={(e) => setClaims({ enabled: e.currentTarget.checked })}
+          />
+          {s.claims.enabled && (
+            <s-stack direction="block" gap="base">
+              <s-paragraph>
+                Claims page: <s-link href={loaded.portalUrl} target="_blank">{loaded.portalUrl}</s-link>. Link to it
+                from your footer menu, shipping policy and order emails.
+              </s-paragraph>
+              {(!loaded.emailReady || !loaded.uploadsReady) && (
+                <s-banner tone="warning" heading="Not fully set up on the app's side">
+                  {!loaded.emailReady && "Claim emails aren't being sent yet (no email service configured). "}
+                  {!loaded.uploadsReady && "Customers can't upload photos yet (no file storage configured)."}
+                </s-banner>
+              )}
+              <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
+                <s-number-field
+                  label="Claim window (days after shipping)"
+                  value={String(s.claims.windowDays)}
+                  min={1}
+                  max={365}
+                  step={1}
+                  onInput={(e) => setClaims({ windowDays: Number(e.currentTarget.value) || 0 })}
+                />
+                <s-number-field
+                  label="Report lost after (days in transit)"
+                  details="0 = any time. Stops “lost” claims for packages that are just slow."
+                  value={String(s.claims.lostAfterDays)}
+                  min={0}
+                  max={90}
+                  step={1}
+                  onInput={(e) => setClaims({ lostAfterDays: Number(e.currentTarget.value) || 0 })}
+                />
+                <s-number-field
+                  label="Claims per order"
+                  details="Rejected claims don't count."
+                  value={String(s.claims.maxPerOrder)}
+                  min={1}
+                  max={10}
+                  step={1}
+                  onInput={(e) => setClaims({ maxPerOrder: Number(e.currentTarget.value) || 1 })}
+                />
+              </s-grid>
+              <s-checkbox
+                label="Only orders that bought shipping protection can be claimed"
+                checked={s.claims.requireProtection}
+                onChange={(e) => setClaims({ requireProtection: e.currentTarget.checked })}
+              />
+              <s-checkbox
+                label="Require a photo for damage claims"
+                checked={s.claims.photosForDamage}
+                onChange={(e) => setClaims({ photosForDamage: e.currentTarget.checked })}
+              />
+              <s-email-field
+                label="Send new-claim emails to"
+                placeholder="Your store's email"
+                value={s.claims.notifyEmail}
+                onInput={(e) => setClaims({ notifyEmail: e.currentTarget.value })}
+              />
+              <s-text-area
+                label="Policy shown on the claims page (optional)"
+                details="Plain text: what's covered, what isn't, and how long decisions take. Shown above the form."
+                rows={4}
+                value={s.claims.policy}
+                onInput={(e) => setClaims({ policy: e.currentTarget.value })}
+              />
+            </s-stack>
+          )}
+        </s-stack>
       </s-section>
 
       {loaded.configured && (

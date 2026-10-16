@@ -8,6 +8,8 @@ node_modules
 /app/build
 /public/build/
 /public/_dev
+# Built from portal/claims-portal.ts (npm run build:portal)
+/public/claims-portal.js
 /app/public/build
 /prisma/dev.sqlite
 /prisma/dev.sqlite-journal

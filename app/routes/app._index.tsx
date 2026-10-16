@@ -14,7 +14,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = await ensureShop(session.shop);
   const since = new Date(Date.now() - DAYS * 86_400_000);
 
-  const [embed, totals, protectedTotals, recent] = await Promise.all([
+  const [embed, totals, protectedTotals, recent, claimCounts] = await Promise.all([
     embedStatus(admin),
     prisma.orderRecord.count({ where: { shop: shop.shop, orderedAt: { gte: since } } }),
     prisma.orderRecord.aggregate({
@@ -27,7 +27,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { orderedAt: "desc" },
       take: 10,
     }),
+    prisma.claim.groupBy({
+      by: ["status"],
+      where: { shop: shop.shop, createdAt: { gte: since } },
+      _count: true,
+      _sum: { amount: true },
+    }),
   ]);
+  const claimsBy = (s: string) => claimCounts.find((c) => c.status === s);
 
   const apiKey = process.env.SHOPIFY_API_KEY || "";
   const configured = shop.settings !== null && shop.syncedVersion > 0;
@@ -45,6 +52,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orders: totals,
       protected: protectedTotals._count,
       revenue: Number(protectedTotals._sum.fee ?? 0),
+    },
+    claims: {
+      enabled: configured && parseSettings(shop.settings).claims.enabled,
+      received: claimCounts.reduce((s, c) => s + c._count, 0),
+      pending: (claimsBy("OPEN")?._count ?? 0) + (claimsBy("NEEDS_INFO")?._count ?? 0),
+      approved: claimsBy("APPROVED")?._count ?? 0,
+      rejected: claimsBy("REJECTED")?._count ?? 0,
+      approvedValue: Number(claimsBy("APPROVED")?._sum.amount ?? 0),
     },
     recent: recent.map((r) => ({
       id: r.orderId,
@@ -136,6 +151,25 @@ export default function Home() {
           <Stat label="Attach rate" value={d.stats.orders ? `${rate}%` : "—"} hint={`of ${d.stats.orders} orders`} />
           <Stat label="Protection revenue" value={money(d.stats.revenue)} />
         </s-grid>
+      </s-section>
+
+      <s-section heading={`Claims, last ${DAYS} days`}>
+        {d.claims.enabled || d.claims.received > 0 ? (
+          <s-stack direction="block" gap="base">
+            <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
+              <Stat label="Received" value={String(d.claims.received)} />
+              <Stat label="Waiting on you or the customer" value={String(d.claims.pending)} />
+              <Stat label="Approved" value={String(d.claims.approved)} hint={`${money(d.claims.approvedValue)} claimed`} />
+              <Stat label="Rejected" value={String(d.claims.rejected)} />
+            </s-grid>
+            <s-link href="/app/claims">Review claims</s-link>
+          </s-stack>
+        ) : (
+          <s-paragraph>
+            Let customers report lost, stolen or damaged packages on your store, and review them here.{" "}
+            <s-link href="/app/settings">Turn on the claims page</s-link>
+          </s-paragraph>
+        )}
       </s-section>
 
       <s-section heading="Recent protected orders">

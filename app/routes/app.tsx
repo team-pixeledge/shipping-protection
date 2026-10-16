@@ -21,6 +21,7 @@ export default function App() {
         <s-link href="/app" {...({ rel: "home" } as object)}>
           Home
         </s-link>
+        <s-link href="/app/claims">Claims</s-link>
         <s-link href="/app/settings">Settings</s-link>
       </s-app-nav>
       <Outlet />

@@ -8,6 +8,7 @@ import {
   type PricingRules,
   type Tier,
 } from "../../shared/pricing";
+import { DEFAULT_CLAIM_SETTINGS, parseClaimSettings, type ClaimSettings } from "./claims";
 
 export interface Settings {
   enabled: boolean;
@@ -18,6 +19,8 @@ export interface Settings {
   copy: { title: string; description: string; learnMoreUrl: string };
   /** Charge tax on the protection fee (sets the variants' taxable flag). */
   taxable: boolean;
+  /** The storefront claims page and how claims are checked (./claims.ts). */
+  claims: ClaimSettings;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -29,6 +32,7 @@ export const DEFAULT_SETTINGS: Settings = {
   optInCountries: OPT_IN_REQUIRED_COUNTRIES,
   copy: { title: "", description: "", learnMoreUrl: "" },
   taxable: false,
+  claims: DEFAULT_CLAIM_SETTINGS,
 };
 
 const num = (v: unknown, fallback: number) => {
@@ -74,6 +78,7 @@ export function parseSettings(raw: unknown): Settings {
       learnMoreUrl: /^https?:\/\//i.test(learnMoreUrl) ? learnMoreUrl : "",
     },
     taxable: o.taxable === true,
+    claims: parseClaimSettings(o.claims),
   };
 }
 

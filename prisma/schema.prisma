@@ -55,9 +55,15 @@ model Shop {
   productHandle String?
   validationId  String? // gid://shopify/Validation/…
 
+  // Storefront path of the app proxy ("/apps/safeship"; merchants can
+  // rename the subpath). Learnt from each proxy request, used to build the
+  // claim links sent by email.
+  portalPath    String    @default("/apps/safeship")
+
   updatedAt DateTime @updatedAt
 
   orders OrderRecord[]
+  claims Claim[]
 }
 
 // One row per order seen by orders/create — protected or not — for the
@@ -81,4 +87,86 @@ model OrderRecord {
 
   @@id([shop, orderId])
   @@index([shop, orderedAt])
+}
+
+// A customer's claim on an order (lost, stolen or damaged package). Filed on
+// the storefront claims page (app proxy, app/routes/proxy.*), reviewed in
+// the admin (app/routes/app.claims*). Holds customer data — the email the
+// customer gave and their description — so customers/redact deletes it
+// (webhooks.compliance.tsx), along with the evidence files in Blob storage.
+model Claim {
+  id          String   @id @default(cuid())
+  shop        String
+  // Per-shop sequence shown as "C-1001".
+  number      Int
+  orderId     String // numeric Shopify order ID
+  orderName   String
+  // LOST | STOLEN | DAMAGED
+  type        String
+  // OPEN | NEEDS_INFO | APPROVED | REJECTED (app/lib/claims.ts)
+  status      String   @default("OPEN")
+  email       String
+  description String
+  // The order lines claimed: [{ lineItemId, title, quantity, amount }]
+  // (amount = shop currency, for the quantity claimed).
+  items       Json
+  amount      Decimal  @db.Decimal(12, 2)
+  currency    String
+  // Whether protection was bought on the order, when the claim was filed.
+  protected   Boolean
+  // Review hints, never verdicts: e.g. NO_PROTECTION, MARKED_DELIVERED.
+  flags       String[]
+  // Shipping snapshot at filing time: [{ status, tracking: [{ number, company, url }], shippedAt, deliveredAt }]
+  shipments   Json
+  // Recorded on approval: REFUND | REPLACEMENT | STORE_CREDIT | OTHER.
+  // Phase 1 only records the decision; the merchant carries it out in Shopify.
+  resolution  String?
+  decidedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  shopRef Shop         @relation(fields: [shop], references: [shop], onDelete: Cascade)
+  events  ClaimEvent[]
+  files   ClaimFile[]
+
+  @@unique([shop, number])
+  @@index([shop, status, createdAt])
+  @@index([shop, orderId])
+  @@index([shop, email])
+}
+
+// The claim's history: every status change, message, note and email.
+// Append-only. internal = merchant-only note, never shown to the customer.
+model ClaimEvent {
+  id        String   @id @default(cuid())
+  claimId   String
+  // CUSTOMER | MERCHANT | SYSTEM
+  actor     String
+  // SUBMITTED | STATUS | MESSAGE | NOTE | FILES | EMAIL
+  kind      String
+  status    String? // the new status, for STATUS
+  message   String?
+  internal  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId, createdAt])
+}
+
+// Evidence a customer uploaded. The bytes live in a private Vercel Blob
+// store under claims/<shop>/<orderId>/…; the admin shows them through
+// short-lived signed links (app/routes/claim-files.$id.tsx).
+model ClaimFile {
+  id          String   @id @default(cuid())
+  claimId     String
+  pathname    String   @unique
+  name        String
+  contentType String
+  size        Int
+  createdAt   DateTime @default(now())
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId])
 }

@@ -16,6 +16,10 @@ the cart, on every Shopify plan.
 - **On the order:** the `shipping_protection.details` metafield, the
   "Shipping protection" tag, the `_shipping_protection` note attribute, and a
   dashboard showing attach rate and revenue.
+- **Claims:** customers report a lost, stolen or damaged package on the
+  store's own domain (`/apps/safeship/claims`), with photos. The merchant
+  reviews it in the app (approve with a resolution, reject, or ask for more
+  information), and both sides get emails at each step.
 
 ## How it works
 
@@ -43,6 +47,36 @@ widget adds whichever variant matches the fee.
 | `app/lib/setup.server.ts` | Pushes settings into Shopify |
 | `app/lib/orders.server.ts` | Order webhook |
 | `app/routes/app._index.tsx` / `app.settings.tsx` | Home (setup and stats) and Settings |
+| `app/lib/claims.ts` | Claim rules: eligibility, flags, item pricing, statuses, settings |
+| `app/lib/claims.server.ts` | Order lookup, filing, status changes, emails |
+| `app/routes/proxy.*` + `app/lib/portal-pages.ts` | Storefront claims page (app proxy, rendered as Liquid in the theme) |
+| `portal/claims-portal.ts` | Claims page script (uploads), bundled into `public/claims-portal.js` |
+| `app/routes/app.claims*` | Admin: claims list and review page |
+| `app/routes/claim-files.$id.tsx` | Evidence files, through short-lived signed links |
+
+### Claims
+
+```
+Customer on the store                  This app (Vercel)                Shopify / services
+──────────────────────                 ─────────────────                ──────────────────
+/apps/safeship/claims ──app proxy────► proxy.claims  ── order lookup ─► Admin API (read_orders)
+  order number + email                   signed "order" token (2 h)
+  pick items, describe, upload ───────► proxy.upload  ── client token ─► Vercel Blob (private)
+  submit ─────────────────────────────► Claim + history ── emails ─────► Resend
+/apps/safeship/claims/<id>?t=… ◄──────── status page (link in emails, 180-day token)
+Admin → Claims ──────────────────────► approve / reject / ask for info ► email to the customer
+```
+
+- The customer proves the order is theirs with its number plus its email,
+  or by being signed in as its customer. The claim form re-reads the order
+  from Shopify, so items and prices never come from the browser.
+- Checks: the order isn't cancelled, has shipped, is within the claim
+  window, bought protection (unless that's turned off), has no open claim,
+  and is under the claims-per-order limit. A damage claim needs a photo.
+- Flags such as "marked delivered but reported lost" are hints for the
+  merchant. A claim is never approved or rejected automatically.
+- Approving records a resolution: refund, replacement, store credit or
+  other. The merchant still carries it out in Shopify.
 
 ## Setup
 
@@ -55,6 +89,16 @@ widget adds whichever variant matches the fee.
 3. Start a database: `docker run -d -p 55451:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=shipping_protection postgres:16`
 4. Copy `.env.example` to `.env` and fill in the keys.
 5. Run `npm install`, then `npx prisma migrate deploy`, then `npm run dev`.
+6. For claims:
+   - **Protected customer data, Level 2.** Request access to the
+     **email** field. The claims page checks the order's email, and the app
+     emails the customer. Dev stores work as soon as the field is selected;
+     the App Store needs a review.
+   - **Resend.** Verify a sending domain, then set `RESEND_API_KEY` and
+     `CLAIMS_EMAIL_FROM`. Without them claims still work, with no emails.
+   - **Vercel Blob.** Use a **private** store; `BLOB_READ_WRITE_TOKEN` is set
+     when it's connected. The production store `safeship-claims` already
+     exists. Without the token, uploads are hidden.
 
 `npm run dev` and `npm run deploy` first run `prepare:extensions`, which copies
 `shared/pricing.ts` into the function and bundles the widget. Never run a bare
@@ -68,7 +112,9 @@ widget adds whichever variant matches the fee.
   the migrations.
 - **AWS (later):** the `Dockerfile` builds a plain Node server
   (`npm run docker-start`). Point both database URLs at RDS.
-- **Extensions and app config:** `npm run deploy`.
+- **Extensions and app config:** `npm run deploy`. This also registers the
+  app proxy. A store that installed the app before the proxy existed must
+  **uninstall and reinstall** the app to get it.
 
 ## Status (2026-10-16)
 
@@ -118,7 +164,23 @@ widget adds whichever variant matches the fee.
 
    The order webhook needs Level 1 protected customer data approval. Without
    it, there is no order record.
-8. **Clean up.** Go to Settings → "Remove from store", then uninstall the app.
+8. **Test a claim.** In Settings → Claims, turn on "Let customers file
+   claims on my store" and save. Then:
+   - Open `https://<store>/apps/safeship/claims` and enter the order number
+     and the email from step 7.
+   - Pick "Arrived damaged" and an item, and add a photo. Submit.
+   - Check that the confirmation email arrives with a link to the claim page.
+   - In the app, open Claims, then the claim. Choose "Ask the customer for
+     more information" and write a message.
+   - In the email, follow the link, reply and add another photo. The claim
+     goes back to "In review".
+   - Approve it with a resolution. The customer gets an email, and Home
+     shows the counts.
+   - Also try these. Each should be refused:
+     - An unshipped order.
+     - The wrong email.
+     - A second claim on the same order.
+9. **Clean up.** Go to Settings → "Remove from store", then uninstall the app.
 
 Warning: `.env` points at the real Neon database. Before running the server
 locally (`react-router-serve`, Prisma), point `DATABASE_URL` and
@@ -127,7 +189,7 @@ locally (`react-router-serve`, Prisma), point `DATABASE_URL` and
 ## Checks
 
 ```bash
-npm test              # 47 tests: pricing, function, orders, embed detection, widget (jsdom)
+npm test              # 69 tests: pricing, function, orders, embed detection, widget (jsdom), claims
 npm run typecheck
 npm run lint
 cd extensions/protection-validation && npx shopify app function build
@@ -156,5 +218,15 @@ cd extensions/protection-validation && npx shopify app function build
   first.
 - **Legal:** this isn't insurance; the merchant handles claims. Tax treatment
   is the merchant's call. Pre-ticking is off in the EU/EEA/UK/CH by default.
-- **Not built yet:** billing, excluded products, per-market fixed prices, a
-  claims portal.
+- **Claims page is English only.** The emails are English too.
+- **Order lookup sees only the last 60 days of orders.** Older orders need the
+  `read_all_orders` scope, which Shopify approves separately.
+- **Resolutions aren't carried out by the app.** Approving records "refund",
+  "replacement" and so on; the merchant issues it in Shopify. That's phase 2.
+- **No rate limit on order lookups.** Guessing needs both the order number
+  and its email.
+- **Uploads that are never submitted stay in Blob storage.** They're deleted
+  on customer or shop redaction, but there's no other cleanup yet.
+- **Not built yet:** billing, excluded products, per-market fixed prices,
+  tracking sync and fraud rules (phase 3), claim analytics and CSV export
+  (phase 4).

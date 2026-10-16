@@ -53,5 +53,15 @@ api_version = "2026-10"
   compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
   uri = "/webhooks/compliance"
 
+# Storefront claims page: https://<store>/apps/safeship/claims →
+# https://safeship-app.vercel.app/proxy/claims (app/routes/proxy.*).
+# Changing url or subpath later doesn't reach stores that already have the
+# app installed — they must uninstall and reinstall. Merchants can rename
+# the subpath themselves; the app learns it from each request (path_prefix).
+[app_proxy]
+url = "https://safeship-app.vercel.app/proxy"
+subpath = "safeship"
+prefix = "apps"
+
 [pos]
 embedded = false
