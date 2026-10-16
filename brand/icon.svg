@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1200" width="1200" height="1200">
+  <!-- SafeShip app icon: a parcel guarded by a shield with a tick. Source for
+       icon-1200.png (Shopify Dev Dashboard / App Store listing) and the
+       public/ favicons — re-export with brand/export.sh after editing. No text
+       and square corners: Shopify rounds the corners itself. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#27A84C"/>
+      <stop offset="1" stop-color="#0E5A26"/>
+    </linearGradient>
+    <linearGradient id="kraft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F7E6C4"/>
+      <stop offset="1" stop-color="#E9CC96"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E4F4E8"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#052E12" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="1200" fill="url(#bg)"/>
+
+  <g transform="translate(0 -85)">
+  <!-- parcel -->
+  <g filter="url(#shadow)">
+    <rect x="200" y="300" width="580" height="560" rx="48" fill="url(#kraft)"/>
+  </g>
+  <!-- lid seam and packing tape -->
+  <rect x="200" y="455" width="580" height="14" fill="#D7B57A"/>
+  <rect x="440" y="300" width="100" height="560" fill="#C99E57" opacity="0.55"/>
+  <!-- shipping label -->
+  <rect x="262" y="560" width="150" height="104" rx="14" fill="#FFFFFF"/>
+  <rect x="284" y="586" width="106" height="14" rx="7" fill="#B9D9C1"/>
+  <rect x="284" y="618" width="72" height="14" rx="7" fill="#B9D9C1"/>
+
+  <!-- shield with tick -->
+  <g transform="translate(560 420)" filter="url(#shadow)">
+    <path d="M220 0 0 82v196c0 172 94 330 220 372 126-42 220-200 220-372V82L220 0Z" fill="url(#shield)"/>
+  </g>
+  <g transform="translate(560 420)">
+    <path d="M220 52 48 116v162c0 144 76 276 172 314 96-38 172-170 172-314V116L220 52Z" fill="#1A7F37"/>
+    <path d="m186 420-96-96 44-44 52 52 120-120 44 44-164 164Z" fill="#FFFFFF"/>
+  </g>
+  </g>
+</svg>
