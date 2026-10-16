@@ -35,8 +35,8 @@ const ORDER_FIELDS = `#graphql
     customer { id }
     lineItems(first: 100) {
       nodes {
-        id title variantTitle currentQuantity
-        product { id }
+        id title variantTitle currentQuantity requiresShipping isGiftCard
+        product { id productType vendor tags }
         discountedUnitPriceAfterAllDiscountsSet { shopMoney { amount } }
         image { url(transform: { maxWidth: 160, maxHeight: 160 }) }
       }
@@ -61,7 +61,9 @@ interface OrderNode {
       title: string;
       variantTitle: string | null;
       currentQuantity: number;
-      product: { id: string } | null;
+      requiresShipping: boolean;
+      isGiftCard: boolean;
+      product: { id: string; productType: string | null; vendor: string | null; tags: string[] } | null;
       discountedUnitPriceAfterAllDiscountsSet: { shopMoney: { amount: string } };
       image: { url: string } | null;
     }[];
@@ -93,6 +95,11 @@ export function toClaimOrder(o: OrderNode): ClaimOrder {
       unitAmount: Number(l.discountedUnitPriceAfterAllDiscountsSet.shopMoney.amount),
       image: l.image?.url ?? null,
       productId: l.product?.id ?? null,
+      requiresShipping: l.requiresShipping,
+      giftCard: l.isGiftCard,
+      productType: l.product?.productType ?? null,
+      vendor: l.product?.vendor ?? null,
+      tags: l.product?.tags ?? [],
     })),
     shipments: o.fulfillments
       .filter((f) => !["CANCELLED", "ERROR", "FAILURE"].includes(f.status))

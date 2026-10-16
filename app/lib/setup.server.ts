@@ -322,8 +322,11 @@ async function setInstallationConfig(admin: AdminGraphql, value: string) {
   check(res.metafieldsSet.userErrors, "Saving the storefront config");
 }
 
-async function ensureValidation(admin: AdminGraphql, validationId: string | null, value: string) {
-  const metafields = [{ namespace: VALIDATION_NAMESPACE, key: "config", type: "json", value }];
+async function ensureValidation(admin: AdminGraphql, validationId: string | null, value: string, vars: string) {
+  const metafields = [
+    { namespace: VALIDATION_NAMESPACE, key: "config", type: "json", value },
+    { namespace: VALIDATION_NAMESPACE, key: "vars", type: "json", value: vars },
+  ];
   // blockOnFailure false: if the function itself fails (timeout, bug), let
   // the order through rather than block every checkout in the store.
   const base = { enable: true, blockOnFailure: false, title: "Shipping protection", metafields };
@@ -420,10 +423,14 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
       defaultOn: settings.defaultOn,
       optInCountries: settings.optInCountries,
       copy: settings.copy,
+      coverage: settings.coverage,
     };
     const value = JSON.stringify(config);
     await setInstallationConfig(admin, value);
-    const validationId = await ensureValidation(admin, row.validationId, value);
+    // The function's input variables: hasAnyTag needs the tags as a query
+    // variable, which Shopify reads from this metafield on the validation.
+    const vars = JSON.stringify({ coverTags: settings.coverage.mode === "ALL" ? [] : settings.coverage.tags });
+    const validationId = await ensureValidation(admin, row.validationId, value, vars);
     await ensureOrderMetafieldDefinition(admin);
 
     await prisma.shop.update({

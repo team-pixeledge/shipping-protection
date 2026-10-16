@@ -11,6 +11,11 @@ the cart, on every Shopify plan.
 - **Right price, once:** the protection is re-priced when the cart changes and
   collapsed if it was added twice. A checkout rule blocks duplicates,
   protection on its own and wrong prices.
+- **Which products are covered:** every product that ships (the default),
+  only products matching some rules, or all except them. Rules can use tags,
+  product types, vendors or specific products. Digital products, services
+  and gift cards are never covered. The fee is calculated on covered items
+  only, and a cart with none isn't offered protection.
 - **Per-market default:** pre-ticked or not, and always unticked in the
   EU/EEA/UK/CH by default.
 - **On the order:** the `shipping_protection.details` metafield, the
@@ -189,7 +194,7 @@ locally (`react-router-serve`, Prisma), point `DATABASE_URL` and
 ## Checks
 
 ```bash
-npm test              # 69 tests: pricing, function, orders, embed detection, widget (jsdom), claims
+npm test              # 84 tests: pricing, coverage, function, orders, embed detection, widget (jsdom), claims
 npm run typecheck
 npm run lint
 cd extensions/protection-validation && npx shopify app function build
@@ -218,6 +223,11 @@ cd extensions/protection-validation && npx shopify app function build
   first.
 - **Legal:** this isn't insurance; the merchant handles claims. Tax treatment
   is the merchant's call. Pre-ticking is off in the EU/EEA/UK/CH by default.
+- **Coverage can't use collections.** The cart and checkout don't say which
+  collections a product is in, so tag the products instead. Tag rules make
+  the widget read `/products/<handle>.js` once per product per session.
+  Coverage changes take effect for new carts; claims follow the current
+  rules.
 - **Claims page is English only.** The emails are English too.
 - **Order lookup sees only the last 60 days of orders.** Older orders need the
   `read_all_orders` scope, which Shopify approves separately.

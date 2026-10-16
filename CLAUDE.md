@@ -74,6 +74,30 @@ applies the Vercel preset when `VERCEL=1`; `Dockerfile` for a container).
 - **Uninstall leaves the product** (no token after uninstall). Settings →
   "Remove from store" deletes product, validation and config first.
 
+## Coverage: which products are protected (added 2026-10-16)
+
+- `Coverage` (shared/pricing.ts) has three modes: ALL, ONLY (match) and
+  EXCEPT (match). A match is a tag, product type, vendor or product ID.
+  `lineCovered` is the one rule, used by the widget, the function and
+  claims. Lines with `requiresShipping === false` or gift cards are **never**
+  covered. Unknown facts (undefined) count as covered, so old inputs behave
+  as before.
+- The fee and every check (`cartProblems`) use covered lines only. ALONE
+  now means "nothing covered in the cart". The ALONE messages were reworded
+  in all six languages.
+- **Tags** aren't in `/cart.js`. The widget reads `/products/<handle>.js`
+  (cached in sessionStorage per product) only when `usesTags`. The
+  function uses `product.hasAnyTag(tags: $coverTags)`. `$coverTags` is an
+  input variable read from the validation's `$app:shipping-protection.vars`
+  metafield (`{"coverTags": [...]}`, written by `syncProtection`), declared
+  in the function toml under `[extensions.input.variables]`. Its query
+  default `[]` covers validations saved before this existed.
+- Collections aren't supported: neither the cart nor the function input can
+  cheaply say which collections a product is in. Tags are the workaround.
+- Matching ignores case on our side. **Assumption:** Shopify's
+  `hasAnyTag` is case-insensitive too. If it isn't, a tag typed in a
+  different case would make the widget and checkout disagree. Unverified.
+
 ## Claims (phase 1, added 2026-10-16)
 
 The merchant's 54-item checklist was split into four phases: 1 claims core

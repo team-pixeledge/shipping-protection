@@ -36,6 +36,57 @@ export interface PricingRules {
   minSubtotal: number;
 }
 
+// ---- Which products are covered ----
+
+/**
+ * ALL    — every product that ships.
+ * ONLY   — only products matching a rule below.
+ * EXCEPT — every product that ships, except those matching a rule.
+ * Products that don't need shipping (digital, services) and gift cards are
+ * never covered, whatever the mode.
+ */
+export type CoverageMode = "ALL" | "ONLY" | "EXCEPT";
+
+export interface Coverage {
+  mode: CoverageMode;
+  /** Product tags, as typed in Shopify. Matching ignores case. */
+  tags: string[];
+  productTypes: string[];
+  vendors: string[];
+  productIds: number[];
+}
+
+export const DEFAULT_COVERAGE: Coverage = { mode: "ALL", tags: [], productTypes: [], vendors: [], productIds: [] };
+
+/** Rules lists are kept short: the config rides on every storefront page. */
+export const COVERAGE_LIMITS = { tags: 50, productTypes: 50, vendors: 50, productIds: 250 };
+
+/** Does the coverage depend on tags (which the cart API doesn't return)? */
+export const usesTags = (c: Coverage | undefined) => !!c && c.mode !== "ALL" && c.tags.length > 0;
+
+const norm = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
+
+/** Does any of these tags appear on the product? Case-insensitive. */
+export const matchesTags = (c: Coverage, productTags: string[]) => {
+  const want = new Set(c.tags.map(norm));
+  return productTags.some((t) => want.has(norm(t)));
+};
+
+/** Is this cart/order line covered by protection (and counted in the fee)? */
+export function lineCovered(c: Coverage | undefined, l: CartLine): boolean {
+  if (l.requiresShipping === false || l.giftCard === true) return false;
+  const cov = c ?? DEFAULT_COVERAGE;
+  if (cov.mode === "ALL") return true;
+  const type = norm(l.productType);
+  const vendor = norm(l.vendor);
+  const match =
+    (l.productId !== null && cov.productIds.includes(l.productId)) ||
+    (type !== "" && cov.productTypes.some((t) => norm(t) === type)) ||
+    (vendor !== "" && cov.vendors.some((v) => norm(v) === vendor)) ||
+    l.tagMatch === true;
+  return cov.mode === "ONLY" ? match : !match;
+}
+
 /** What the storefront and the validation function read (a metafield). */
 export interface ProtectionConfig {
   /** Bumped on every save; the widget re-checks the cart when it changes. */
@@ -54,6 +105,8 @@ export interface ProtectionConfig {
   /** ISO country codes where protection always starts unticked. */
   optInCountries: string[];
   copy: { title: string; description: string; learnMoreUrl: string };
+  /** Which products are covered. Missing in configs saved before it existed = ALL. */
+  coverage?: Coverage;
 }
 
 /**
@@ -225,6 +278,14 @@ export interface CartLine {
   quantity: number;
   /** Line subtotal in the presentment currency (major units). */
   subtotal: number;
+  // What decides coverage (lineCovered). Unknown (undefined) = covered, as
+  // before coverage rules existed.
+  requiresShipping?: boolean;
+  giftCard?: boolean;
+  productType?: string | null;
+  vendor?: string | null;
+  /** The product has one of the coverage tags. */
+  tagMatch?: boolean;
 }
 
 export type Problem = "DUPLICATE" | "ALONE" | "UNAVAILABLE" | "PRICE";
@@ -255,16 +316,17 @@ export function cartProblems(cfg: ProtectionConfig, lines: CartLine[], rate: num
   const isProtection = (l: CartLine) => l.productId === cfg.productId;
   const prot = lines.filter(isProtection);
   if (!prot.length) return [];
-  const others = lines.filter((l) => !isProtection(l));
+  // Only covered products count: alone = nothing in the cart it protects.
+  const covered = lines.filter((l) => !isProtection(l) && lineCovered(cfg.coverage, l));
   const problems: Problem[] = [];
 
   const qty = prot.reduce((n, l) => n + l.quantity, 0);
   if (qty > 1) problems.push("DUPLICATE");
-  if (!others.length) {
+  if (!covered.length) {
     problems.push("ALONE");
     return problems;
   }
-  const subtotal = others.reduce((s, l) => s + l.subtotal, 0) / (rate > 0 ? rate : 1);
+  const subtotal = covered.reduce((s, l) => s + l.subtotal, 0) / (rate > 0 ? rate : 1);
   const accepted = acceptedVariants(cfg, subtotal);
   if (!accepted.size) problems.push("UNAVAILABLE");
   else if (prot.some((l) => l.variantId === null || !accepted.has(l.variantId))) problems.push("PRICE");

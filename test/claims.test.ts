@@ -13,8 +13,10 @@ import {
   typeProblem,
   type ClaimOrder,
   type ClaimSettings,
+  type OrderLine,
 } from "../app/lib/claims";
 import { signToken, tokenShop, verifyToken } from "../app/lib/claim-token.server";
+import { DEFAULT_COVERAGE } from "../shared/pricing";
 import { toClaimOrder } from "../app/lib/claims.server";
 import { claimFormPage, esc, lookupPage, statusPage } from "../app/lib/portal-pages";
 
@@ -25,6 +27,10 @@ const daysAgo = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOStr
 
 const settings: ClaimSettings = { ...DEFAULT_CLAIM_SETTINGS, enabled: true };
 
+function line(p: Partial<OrderLine> & Pick<OrderLine, "id" | "title" | "quantity" | "unitAmount" | "productId">): OrderLine {
+  return { variantTitle: null, image: null, requiresShipping: true, giftCard: false, productType: null, vendor: null, tags: [], ...p };
+}
+
 const order = (patch: Partial<ClaimOrder> = {}): ClaimOrder => ({
   id: "5001",
   name: "#1001",
@@ -34,9 +40,12 @@ const order = (patch: Partial<ClaimOrder> = {}): ClaimOrder => ({
   cancelled: false,
   currency: "EUR",
   lines: [
-    { id: "gid://shopify/LineItem/1", title: "Vase", variantTitle: "Blue", quantity: 2, unitAmount: 24.5, image: null, productId: "gid://shopify/Product/1" },
-    { id: "gid://shopify/LineItem/2", title: "Shipping protection", variantTitle: "2.95", quantity: 1, unitAmount: 2.95, image: null, productId: PROTECTION },
-    { id: "gid://shopify/LineItem/3", title: "Refunded mug", variantTitle: null, quantity: 0, unitAmount: 9, image: null, productId: "gid://shopify/Product/3" },
+    line({ id: "gid://shopify/LineItem/1", title: "Vase", variantTitle: "Blue", quantity: 2, unitAmount: 24.5, productId: "gid://shopify/Product/1", tags: ["Fragile"] }),
+    line({ id: "gid://shopify/LineItem/2", title: "Shipping protection", variantTitle: "2.95", quantity: 1, unitAmount: 2.95, productId: PROTECTION }),
+    line({ id: "gid://shopify/LineItem/3", title: "Refunded mug", quantity: 0, unitAmount: 9, productId: "gid://shopify/Product/3" }),
+    line({ id: "gid://shopify/LineItem/4", title: "E-book", quantity: 1, unitAmount: 5, productId: "gid://shopify/Product/4", requiresShipping: false }),
+    line({ id: "gid://shopify/LineItem/5", title: "Gift card", quantity: 1, unitAmount: 25, productId: "gid://shopify/Product/5", giftCard: true }),
+    line({ id: "gid://shopify/LineItem/6", title: "Poster", quantity: 1, unitAmount: 10, productId: "gid://shopify/Product/6", productType: "Print", vendor: "Acme" }),
   ],
   shipments: [{ status: "IN_TRANSIT", shippedAt: daysAgo(8), deliveredAt: null, tracking: [{ number: "1Z9", company: "UPS", url: null }] }],
   ...patch,
@@ -61,8 +70,15 @@ describe("order lookup helpers", () => {
     expect(sameEmail("", "")).toBe(false);
   });
 
-  test("the protection line and fully-removed lines can't be claimed", () => {
-    expect(claimableLines(order(), PROTECTION).map((l) => l.title)).toEqual(["Vase"]);
+  test("the protection line, removed lines, digital items and gift cards can't be claimed", () => {
+    expect(claimableLines(order(), PROTECTION).map((l) => l.title)).toEqual(["Vase", "Poster"]);
+  });
+
+  test("claimable lines follow the store's coverage rules", () => {
+    const only = { ...DEFAULT_COVERAGE, mode: "ONLY" as const, tags: ["fragile"] };
+    expect(claimableLines(order(), PROTECTION, only).map((l) => l.title)).toEqual(["Vase"]);
+    const except = { ...DEFAULT_COVERAGE, mode: "EXCEPT" as const, vendors: ["acme"] };
+    expect(claimableLines(order(), PROTECTION, except).map((l) => l.title)).toEqual(["Vase"]);
   });
 });
 
@@ -204,6 +220,8 @@ describe("toClaimOrder", () => {
             title: "Vase",
             variantTitle: null,
             currentQuantity: 1,
+            requiresShipping: true,
+            isGiftCard: false,
             product: null,
             discountedUnitPriceAfterAllDiscountsSet: { shopMoney: { amount: "19.90" } },
             image: null,

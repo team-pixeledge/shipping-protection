@@ -65,7 +65,7 @@ describe("validation function", () => {
   });
   test("unknown language falls back to English", () => {
     const r = cartValidationsGenerateRun(input([line(ok, 7, 1, 3)], undefined, "PT_BR"));
-    expect(errors(r)[0].message).toMatch(/on its own/);
+    expect(errors(r)[0].message).toMatch(/only covers products that are shipped/);
   });
 });
 

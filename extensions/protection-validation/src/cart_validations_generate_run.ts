@@ -21,7 +21,12 @@ interface Input {
     lines: {
       quantity: number;
       cost: { subtotalAmount: { amount: string | number } };
-      merchandise: { __typename: string; id?: string; product?: { id: string } };
+      merchandise: {
+        __typename: string;
+        id?: string;
+        requiresShipping?: boolean;
+        product?: { id: string; isGiftCard?: boolean; productType?: string | null; vendor?: string | null; hasAnyTag?: boolean };
+      };
     }[];
   };
   validation: { metafield?: { jsonValue: unknown } | null };
@@ -34,37 +39,37 @@ interface Result {
 const MESSAGES: Record<string, Record<Problem, string>> = {
   EN: {
     DUPLICATE: "Shipping protection can only be added once. Please return to your cart.",
-    ALONE: "Shipping protection can't be bought on its own. Please add a product to your cart.",
+    ALONE: "Shipping protection only covers products that are shipped. Please remove it in your cart, or add a product.",
     UNAVAILABLE: "Shipping protection isn't available for this order. Please remove it in your cart.",
     PRICE: "The shipping protection price has changed. Please return to your cart to update it.",
   },
   DE: {
     DUPLICATE: "Der Versandschutz kann nur einmal hinzugefügt werden. Bitte kehre zum Warenkorb zurück.",
-    ALONE: "Der Versandschutz kann nicht allein gekauft werden. Bitte lege ein Produkt in den Warenkorb.",
+    ALONE: "Der Versandschutz gilt nur für versendete Produkte. Bitte entferne ihn im Warenkorb oder lege ein Produkt hinein.",
     UNAVAILABLE: "Für diese Bestellung ist kein Versandschutz verfügbar. Bitte entferne ihn im Warenkorb.",
     PRICE: "Der Preis des Versandschutzes hat sich geändert. Bitte aktualisiere ihn im Warenkorb.",
   },
   FR: {
     DUPLICATE: "La protection d'expédition ne peut être ajoutée qu'une fois. Veuillez revenir au panier.",
-    ALONE: "La protection d'expédition ne peut pas être achetée seule. Ajoutez un produit au panier.",
+    ALONE: "La protection d'expédition ne couvre que les produits expédiés. Retirez-la du panier ou ajoutez un produit.",
     UNAVAILABLE: "La protection d'expédition n'est pas disponible pour cette commande. Retirez-la du panier.",
     PRICE: "Le prix de la protection d'expédition a changé. Veuillez le mettre à jour dans le panier.",
   },
   ES: {
     DUPLICATE: "La protección de envío solo se puede añadir una vez. Vuelve a tu carrito.",
-    ALONE: "La protección de envío no se puede comprar sola. Añade un producto a tu carrito.",
+    ALONE: "La protección de envío solo cubre productos que se envían. Quítala en tu carrito o añade un producto.",
     UNAVAILABLE: "La protección de envío no está disponible para este pedido. Quítala en tu carrito.",
     PRICE: "El precio de la protección de envío ha cambiado. Actualízalo en tu carrito.",
   },
   IT: {
     DUPLICATE: "La protezione della spedizione può essere aggiunta una sola volta. Torna al carrello.",
-    ALONE: "La protezione della spedizione non può essere acquistata da sola. Aggiungi un prodotto al carrello.",
+    ALONE: "La protezione della spedizione copre solo i prodotti spediti. Rimuovila dal carrello o aggiungi un prodotto.",
     UNAVAILABLE: "La protezione della spedizione non è disponibile per questo ordine. Rimuovila dal carrello.",
     PRICE: "Il prezzo della protezione della spedizione è cambiato. Aggiornalo nel carrello.",
   },
   NL: {
     DUPLICATE: "Verzendbescherming kan maar één keer worden toegevoegd. Ga terug naar je winkelwagen.",
-    ALONE: "Verzendbescherming kan niet los worden gekocht. Voeg een product toe aan je winkelwagen.",
+    ALONE: "Verzendbescherming geldt alleen voor producten die worden verzonden. Verwijder deze in je winkelwagen of voeg een product toe.",
     UNAVAILABLE: "Verzendbescherming is niet beschikbaar voor deze bestelling. Verwijder deze in je winkelwagen.",
     PRICE: "De prijs van de verzendbescherming is gewijzigd. Werk deze bij in je winkelwagen.",
   },
@@ -89,6 +94,11 @@ export function cartValidationsGenerateRun(input: Input): Result {
     productId: numericId(l.merchandise.product?.id),
     quantity: l.quantity,
     subtotal: Number(l.cost.subtotalAmount.amount),
+    requiresShipping: l.merchandise.requiresShipping,
+    giftCard: l.merchandise.product?.isGiftCard,
+    productType: l.merchandise.product?.productType,
+    vendor: l.merchandise.product?.vendor,
+    tagMatch: l.merchandise.product?.hasAnyTag,
   }));
   const rate = Number(input.presentmentCurrencyRate) || 1;
   const problems = cartProblems(cfg, lines, rate);

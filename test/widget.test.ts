@@ -35,6 +35,11 @@ interface Item {
   variant_id: number;
   quantity: number;
   price: number;
+  handle?: string;
+  requires_shipping?: boolean;
+  gift_card?: boolean;
+  product_type?: string;
+  vendor?: string;
 }
 
 class FakeCart {
@@ -42,6 +47,9 @@ class FakeCart {
   attributes: Record<string, string> = {};
   updates: unknown[] = [];
   n = 0;
+  /** /products/<handle>.js tags, and how often they were read. */
+  tags: Record<string, string[]> = {};
+  productReads = 0;
 
   json() {
     const items = this.items.map((i) => ({
@@ -81,6 +89,11 @@ class FakeCart {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     if (url.endsWith("/cart.js")) return Response.json(this.json());
+    const product = url.match(/\/products\/([^/]+)\.js$/);
+    if (product) {
+      this.productReads++;
+      return Response.json({ tags: this.tags[decodeURIComponent(product[1])] ?? [] });
+    }
     if (url.endsWith("/cart/update.js")) {
       this.updates.push(body);
       for (const [k, q] of Object.entries(body.updates ?? {})) this.setQty(k, q as number);
@@ -99,8 +112,9 @@ class FakeCart {
   };
 
   /** A real product line, price in cents. */
-  add(cents: number) {
-    this.items.push({ key: `1:${++this.n}`, product_id: 1, variant_id: 1, quantity: 1, price: cents });
+  add(cents: number, extra: Partial<Item> = {}) {
+    const n = ++this.n;
+    this.items.push({ key: `1:${n}`, product_id: 1, variant_id: 1, quantity: 1, price: cents, handle: `p${n}`, ...extra });
   }
   protection() {
     return this.items.filter((i) => i.product_id === PROTECTION);
@@ -239,5 +253,37 @@ describe("widget", () => {
     const [prot, shirt] = ul.querySelectorAll("li");
     expect(prot.classList.contains("sp-hidden-line")).toBe(true);
     expect(shirt.classList.contains("sp-hidden-line")).toBe(false);
+  });
+
+  test("digital-only cart: protection isn't offered, and is removed if present", async () => {
+    cart.add(10000, { requires_shipping: false });
+    cart.setQty(String(baseCfg.ladder[0][1]), 1);
+    await boot();
+    expect(cart.protection()).toHaveLength(0);
+    expect((document.querySelector("[data-sp-auto]") as HTMLElement).hidden).toBe(true);
+  });
+
+  test("the fee counts covered products only", async () => {
+    cart.add(10000);
+    cart.add(50000, { product_id: 2, vendor: "BigCo" });
+    await boot({ coverage: { mode: "EXCEPT", tags: [], productTypes: [], vendors: ["bigco"], productIds: [] } });
+    expect(cart.protection()[0].variant_id).toBe(quote(baseCfg, 100)!.variantId);
+  });
+
+  test("tag rules read each product's tags once", async () => {
+    cart.add(10000, { product_id: 3, handle: "vase" });
+    cart.tags.vase = ["Fragile"];
+    await boot({ coverage: { mode: "ONLY", tags: ["fragile"], productTypes: [], vendors: [], productIds: [] } });
+    expect(cart.protection()).toHaveLength(1);
+    const reads = cart.productReads;
+    await window.fetch("/cart/update.js", { method: "POST", body: JSON.stringify({ updates: {} }) });
+    await settle();
+    expect(cart.productReads).toBe(reads); // cached for the session
+  });
+
+  test("ONLY rules with no matching product: not offered", async () => {
+    cart.add(10000, { product_id: 3, handle: "mug" });
+    await boot({ coverage: { mode: "ONLY", tags: ["fragile"], productTypes: [], vendors: [], productIds: [] } });
+    expect(cart.protection()).toHaveLength(0);
   });
 });

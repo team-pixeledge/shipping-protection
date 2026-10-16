@@ -57,7 +57,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       orderName: order.name,
       email,
       token,
-      lines: claimableLines(order, ctx.row!.productId),
+      lines: claimableLines(order, ctx.row!.productId, ctx.coverage),
       currency: order.currency,
       uploads: uploadsConfigured(),
       photosForDamage: settings.photosForDamage,
@@ -140,7 +140,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const type = String(form.get("type") ?? "");
   const description = String(form.get("description") ?? "").trim().slice(0, 3000);
-  const lines = claimableLines(order, ctx.row!.productId);
+  const lines = claimableLines(order, ctx.row!.productId, ctx.coverage);
   const picked: Record<string, number> = {};
   for (const id of form.getAll("line").map(String)) {
     if (!/^\d+$/.test(id)) continue;

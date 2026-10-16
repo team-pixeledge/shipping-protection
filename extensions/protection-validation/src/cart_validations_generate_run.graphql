@@ -1,4 +1,6 @@
-query CartValidationsGenerateRunInput {
+# $coverTags comes from the validation's "vars" metafield ({"coverTags": [...]},
+# written by app/lib/setup.server.ts); the default covers older installs.
+query CartValidationsGenerateRunInput($coverTags: [String!] = []) {
   buyerJourney {
     step
   }
@@ -20,8 +22,13 @@ query CartValidationsGenerateRunInput {
         __typename
         ... on ProductVariant {
           id
+          requiresShipping
           product {
             id
+            isGiftCard
+            productType
+            vendor
+            hasAnyTag(tags: $coverTags)
           }
         }
       }

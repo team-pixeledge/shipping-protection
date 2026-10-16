@@ -13,6 +13,7 @@ import {
   OPT_IN_REQUIRED_COUNTRIES,
   snapIndex,
   toMinor,
+  type CoverageMode,
   type FeeMode,
   type PricingRules,
   type Tier,
@@ -90,6 +91,9 @@ export default function SettingsPage() {
   const loaded = useLoaderData<typeof loader>();
   const [s, setS] = useState<Settings>(loaded.settings);
   const [countries, setCountries] = useState(loaded.settings.optInCountries.join(", "));
+  const [covTags, setCovTags] = useState(loaded.settings.coverage.tags.join(", "));
+  const [covTypes, setCovTypes] = useState(loaded.settings.coverage.productTypes.join(", "));
+  const [covVendors, setCovVendors] = useState(loaded.settings.coverage.vendors.join(", "));
   const [tryValue, setTryValue] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
   const fetcher = useFetcher<ActionResult>();
@@ -112,7 +116,12 @@ export default function SettingsPage() {
     .split(/[\s,]+/)
     .map((c) => c.trim().toUpperCase())
     .filter(Boolean);
-  const current: Settings = { ...s, optInCountries: parsedCountries };
+  const list = (v: string) => [...new Set(v.split(",").map((x) => x.trim()).filter(Boolean))];
+  const current: Settings = {
+    ...s,
+    optInCountries: parsedCountries,
+    coverage: { ...s.coverage, tags: list(covTags), productTypes: list(covTypes), vendors: list(covVendors) },
+  };
   const errors = settingsErrors(current);
   const missing = missingOptInCountries(current);
   const dirty = JSON.stringify(current) !== JSON.stringify(loaded.settings) || !loaded.configured;
@@ -146,6 +155,24 @@ export default function SettingsPage() {
       onInput={(e) => onChange(num(e.currentTarget.value))}
     />
   );
+
+  const pickProducts = async () => {
+    const picked = (await shopify.resourcePicker({
+      type: "product",
+      multiple: true,
+      filter: { variants: false },
+      selectionIds: s.coverage.productIds.map((id) => ({ id: `gid://shopify/Product/${id}` })),
+    })) as { id: string; title: string }[] | undefined;
+    if (!picked) return;
+    const ids = picked.map((p) => Number(p.id.split("/").pop())).slice(0, 250);
+    setS({
+      ...s,
+      coverage: { ...s.coverage, productIds: ids },
+      coverageProductTitles: Object.fromEntries(picked.map((p) => [p.id.split("/").pop()!, p.title])),
+    });
+  };
+  const removeProduct = (id: number) =>
+    setS({ ...s, coverage: { ...s.coverage, productIds: s.coverage.productIds.filter((x) => x !== id) } });
 
   const save = () =>
     fetcher.submit({ intent: "save", settings: current } as never, { method: "POST", encType: "application/json" });
@@ -260,6 +287,66 @@ export default function SettingsPage() {
           {field("Only offer from a cart value of", s.rules.minSubtotal, (n) => setRules({ minSubtotal: n }), {
             details: "0 = always offer it.",
           })}
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Which products are covered">
+        <s-stack direction="block" gap="base">
+          <s-select
+            label="Protection covers"
+            value={s.coverage.mode}
+            onChange={(e) => setS({ ...s, coverage: { ...s.coverage, mode: e.currentTarget.value as CoverageMode } })}
+          >
+            <s-option value="ALL">All products that ship</s-option>
+            <s-option value="ONLY">Only products that match the rules below</s-option>
+            <s-option value="EXCEPT">All products that ship, except those that match the rules below</s-option>
+          </s-select>
+          <s-text color="subdued">
+            Products that don&apos;t need shipping (digital products, services) and gift cards are never covered. The
+            fee is calculated on covered products only, and a cart with none isn&apos;t offered protection.
+          </s-text>
+          {s.coverage.mode !== "ALL" && (
+            <s-stack direction="block" gap="base">
+              <s-text>A product matches if it has any of these:</s-text>
+              <s-text-field
+                label="Product tags"
+                details="Separated by commas, e.g. fragile, no-protection. Case doesn't matter."
+                value={covTags}
+                onInput={(e) => setCovTags(e.currentTarget.value)}
+              />
+              <s-text-field
+                label="Product types"
+                details="Separated by commas, as set on the product (Product organization → Type)."
+                value={covTypes}
+                onInput={(e) => setCovTypes(e.currentTarget.value)}
+              />
+              <s-text-field
+                label="Vendors"
+                details="Separated by commas."
+                value={covVendors}
+                onInput={(e) => setCovVendors(e.currentTarget.value)}
+              />
+              <s-stack direction="block" gap="small-200">
+                <s-text>Specific products ({s.coverage.productIds.length})</s-text>
+                {s.coverage.productIds.length > 0 && (
+                  <s-stack direction="inline" gap="small-200">
+                    {s.coverage.productIds.map((id) => (
+                      <s-clickable-chip key={id} removable onRemove={() => removeProduct(id)}>
+                        {s.coverageProductTitles[String(id)] ?? `Product ${id}`}
+                      </s-clickable-chip>
+                    ))}
+                  </s-stack>
+                )}
+                <s-stack direction="inline" gap="small-200">
+                  <s-button onClick={pickProducts}>Choose products</s-button>
+                </s-stack>
+              </s-stack>
+              <s-text color="subdued">
+                Collections can&apos;t be used: the cart doesn&apos;t know which collections a product is in. Tag the
+                products instead (bulk-edit in Products, or Shopify Flow).
+              </s-text>
+            </s-stack>
+          )}
         </s-stack>
       </s-section>
 

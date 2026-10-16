@@ -7,6 +7,11 @@ uid = "6e8ceb09-d831-4dd1-bf1d-e171bb62f23dade57bde"
 type = "function"
 description = "t:description"
 
+  # Coverage tags for product.hasAnyTag (see the input query).
+  [extensions.input.variables]
+  namespace = "$app:shipping-protection"
+  key = "vars"
+
   [[extensions.targeting]]
   target = "cart.validations.generate.run"
   input_query = "src/cart_validations_generate_run.graphql"

@@ -35,6 +35,7 @@ export async function proxyContext(request: Request) {
     customerId,
     row,
     claimSettings: settings?.claims ?? null,
+    coverage: settings?.coverage,
     opts,
     render,
     available: !!admin && !!row && !row.uninstalledAt && !!settings?.claims.enabled,

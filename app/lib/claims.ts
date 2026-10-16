@@ -1,3 +1,5 @@
+import { lineCovered, matchesTags, type Coverage } from "../../shared/pricing";
+
 // Claims: the rules, with no I/O. Shared by the storefront claims page
 // (app/routes/proxy.*), the admin (app/routes/app.claims*) and the settings
 // page, so nothing server-only may be imported here.
@@ -129,6 +131,11 @@ export interface OrderLine {
   unitAmount: number;
   image: string | null;
   productId: string | null; // gid://shopify/Product/…
+  requiresShipping: boolean;
+  giftCard: boolean;
+  productType: string | null;
+  vendor: string | null;
+  tags: string[];
 }
 
 export interface Shipment {
@@ -156,9 +163,28 @@ export const normalizeOrderName = (s: string) => s.trim().replace(/^#/, "").repl
 export const sameEmail = (a: string | null | undefined, b: string | null | undefined) =>
   !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
 
-/** Lines a customer may claim: real goods, not the protection line itself. */
-export const claimableLines = (order: ClaimOrder, protectionProductId: string | null) =>
-  order.lines.filter((l) => l.quantity > 0 && (!protectionProductId || l.productId !== protectionProductId));
+/**
+ * Lines a customer may claim: goods the protection covers (the store's
+ * current coverage rules — no digital items, gift cards or excluded
+ * products), never the protection line itself.
+ */
+export const claimableLines = (order: ClaimOrder, protectionProductId: string | null, coverage?: Coverage) =>
+  order.lines.filter(
+    (l) =>
+      l.quantity > 0 &&
+      (!protectionProductId || l.productId !== protectionProductId) &&
+      lineCovered(coverage, {
+        variantId: null,
+        productId: l.productId ? Number(l.productId.split("/").pop()) : null,
+        quantity: l.quantity,
+        subtotal: 0,
+        requiresShipping: l.requiresShipping,
+        giftCard: l.giftCard,
+        productType: l.productType,
+        vendor: l.vendor,
+        tagMatch: coverage ? matchesTags(coverage, l.tags) : false,
+      }),
+  );
 
 const DAY = 86_400_000;
 const daysBetween = (from: string, to: Date) => (to.getTime() - new Date(from).getTime()) / DAY;

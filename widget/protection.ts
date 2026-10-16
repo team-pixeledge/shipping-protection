@@ -20,7 +20,16 @@
 //
 // The checkout validation function enforces the same rules server-side;
 // everything here is convenience, not security.
-import { quote, startsOn, type ProtectionConfig, type Quote } from "../shared/pricing";
+import {
+  lineCovered,
+  matchesTags,
+  quote,
+  startsOn,
+  usesTags,
+  type CartLine,
+  type ProtectionConfig,
+  type Quote,
+} from "../shared/pricing";
 
 interface Env {
   country: string;
@@ -42,6 +51,11 @@ interface CartItem {
   quantity: number;
   final_price: number;
   final_line_price: number;
+  handle: string;
+  requires_shipping: boolean;
+  gift_card: boolean;
+  product_type: string | null;
+  vendor: string | null;
 }
 
 interface Cart {
@@ -184,6 +198,66 @@ class Widget {
     return res.json();
   }
 
+  // ---- Coverage ----
+
+  /**
+   * Tags per product. /cart.js doesn't include tags, so when coverage uses
+   * them each product's /products/<handle>.js is read once per tab session.
+   */
+  private async productTags(items: CartItem[]): Promise<Map<number, string[]>> {
+    const out = new Map<number, string[]>();
+    if (!usesTags(this.cfg.coverage)) return out;
+    const key = (id: number) => `sp-tags:${id}`;
+    await Promise.all(
+      [...new Map(items.map((i) => [i.product_id, i])).values()].map(async (item) => {
+        try {
+          const cached = sessionStorage.getItem(key(item.product_id));
+          if (cached) {
+            out.set(item.product_id, JSON.parse(cached));
+            return;
+          }
+        } catch {
+          /* private mode */
+        }
+        try {
+          const res = await fetch(`${this.root}products/${encodeURIComponent(item.handle)}.js`, {
+            headers: { Accept: "application/json" },
+          });
+          const tags: string[] = res.ok ? ((await res.json()).tags ?? []) : [];
+          out.set(item.product_id, tags);
+          try {
+            sessionStorage.setItem(key(item.product_id), JSON.stringify(tags));
+          } catch {
+            /* private mode */
+          }
+        } catch {
+          out.set(item.product_id, []);
+        }
+      }),
+    );
+    return out;
+  }
+
+  /** The cart lines protection covers (and charges for). */
+  private async coveredItems(items: CartItem[]) {
+    const tags = await this.productTags(items);
+    const cov = this.cfg.coverage;
+    return items.filter((i) => {
+      const line: CartLine = {
+        variantId: i.variant_id,
+        productId: i.product_id,
+        quantity: i.quantity,
+        subtotal: i.final_line_price / 100,
+        requiresShipping: i.requires_shipping,
+        giftCard: i.gift_card,
+        productType: i.product_type,
+        vendor: i.vendor,
+        tagMatch: cov ? matchesTags(cov, tags.get(i.product_id) ?? []) : false,
+      };
+      return lineCovered(cov, line);
+    });
+  }
+
   // ---- The decision ----
 
   private seenKey(token: string) {
@@ -235,8 +309,11 @@ class Widget {
         attributes[ATTR] = "declined";
       }
 
-      const subtotal = others.reduce((s, i) => s + i.final_line_price, 0) / 100 / this.rate;
-      const q = others.length ? quote(this.cfg, subtotal) : null;
+      // The fee is on covered products only; with none (only digital items,
+      // or nothing matching the merchant's rules) protection isn't offered.
+      const covered = await this.coveredItems(others);
+      const subtotal = covered.reduce((s, i) => s + i.final_line_price, 0) / 100 / this.rate;
+      const q = covered.length ? quote(this.cfg, subtotal) : null;
       const want =
         q !== null &&
         (choice === "accepted" ||
