@@ -70,6 +70,60 @@ widget adds whichever variant matches the fee.
   (`npm run docker-start`). Point both database URLs at RDS.
 - **Extensions and app config:** `npm run deploy`.
 
+## Status (2026-10-16)
+
+- App **SafeShip: Shipping Protection** is linked in `shopify.app.toml` and
+  hosted at https://safeship-app.vercel.app (Neon database).
+- Version `safeship-shipping-protection-3` is released (extensions + config).
+- There is only a production app so far. There is no staging app yet.
+- It has not been tested on a real store yet. See the unverified list in
+  `CLAUDE.md`.
+
+## Testing on a dev store
+
+1. **Create a dev store.** In the Partner Dashboard, go to Stores → Add store
+   → Development store. Use a Dawn or Horizon theme and add a few products.
+2. **Install the app.** In the Dev Dashboard, open the app and go to Test on
+   development store, or run `npm run dev` and choose the store. The admin
+   loads from Vercel. `automatically_update_urls_on_dev = false` keeps the
+   production URL from being swapped for a tunnel.
+3. **Save the settings.** Open the app, then go to Settings, pick a pricing
+   model and click Save. This creates the hidden product, its variants and the
+   checkout rule. Before the first save, nothing in the store changes.
+4. **Turn on the theme embed.** Go to Online Store → Themes → Customize → App
+   embeds and turn on Shipping protection. Home shows a warning while it's
+   off.
+5. **Test the storefront.**
+   - Add a product. The toggle appears above the checkout button in the cart
+     drawer and on `/cart`.
+   - Turn the toggle off and on. The line is removed and added with no page
+     reload.
+   - Change the quantities. The fee is re-priced. With % pricing, the fee
+     changes in steps.
+   - Remove the protection line with the theme's own remove button. It should
+     stay off, because that counts as a decline.
+   - Use a country in the EU, UK or CH (from the country selector). The toggle
+     starts unticked.
+6. **Test the checkout rule.** Use the cart API in the browser console to
+   force a bad cart, then go to checkout. Each case should be blocked:
+   - Protection with quantity 2.
+   - Protection alone in the cart.
+   - The wrong price variant.
+7. **Test an order.** Turn on the Bogus gateway (Settings → Payments → test
+   mode) and pay with card `1`. Then check:
+   - The order has the tag "Shipping protection".
+   - The order has the metafield `shipping_protection.details`.
+   - The order has the note attribute `_shipping_protection`.
+   - The order appears in the stats on Home.
+
+   The order webhook needs Level 1 protected customer data approval. Without
+   it, there is no order record.
+8. **Clean up.** Go to Settings → "Remove from store", then uninstall the app.
+
+Warning: `.env` points at the real Neon database. Before running the server
+locally (`react-router-serve`, Prisma), point `DATABASE_URL` and
+`DATABASE_URL_UNPOOLED` at the local Docker database.
+
 ## Checks
 
 ```bash

@@ -4,6 +4,7 @@ import { buildLadder, DEFAULT_RULES, quote, type ProtectionConfig } from "../sha
 import { embedEnabled, parseSettingsData } from "../app/lib/embed.server";
 import { orderDetails, type OrderPayload } from "../app/lib/orders.server";
 import { parseSettings } from "../app/lib/settings";
+import { findOnlineStorePublication } from "../app/lib/setup.server";
 
 const rules = { ...DEFAULT_RULES, mode: "PERCENT" as const, percent: 3, minFee: 0.5, maxFee: 100 };
 const cfg: ProtectionConfig = {
@@ -122,5 +123,26 @@ describe("parseSettings", () => {
     expect(s.copy.title).toBe("Hi");
     expect(s.enabled).toBe(false);
     expect("extra" in s).toBe(false);
+  });
+});
+
+describe("findOnlineStorePublication", () => {
+  const pub = (id: string, title: string, handles: string[]) => ({
+    id,
+    catalog: { title, apps: { nodes: handles.map((handle) => ({ handle })) } },
+  });
+
+  test("matches the Online Store app handle, whatever the title", () => {
+    const nodes = [pub("pos", "Point of Sale", ["pos"]), pub("os", "Onlineshop", ["online_store"])];
+    expect(findOnlineStorePublication(nodes)?.id).toBe("os");
+  });
+
+  test("falls back to the English title; null catalogs are skipped", () => {
+    const nodes = [{ id: "x", catalog: null }, { id: "os", catalog: { title: "Online Store" } }];
+    expect(findOnlineStorePublication(nodes)?.id).toBe("os");
+  });
+
+  test("undefined when there is no Online Store", () => {
+    expect(findOnlineStorePublication([pub("pos", "Point of Sale", ["pos"])])).toBeUndefined();
   });
 });

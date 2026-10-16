@@ -83,10 +83,12 @@ applies the Vercel preset when `VERCEL=1`; `Dockerfile` for a container).
 - Admin GraphQL inputs checked by introspecting 2026-10
   (`shopify.dev/admin-graphql-direct-proxy/2026-10`): ProductStatus
   UNLISTED, ValidationCreate/UpdateInput, ProductVariantsBulkInput, etc.
-- **Not yet run against a real store** — no client_id yet. Unverified:
-  `write_validations` scope name, Online Store publication lookup by
-  catalog title, Liquid `app.metafields` access, Horizon `cart:update`
-  redraw, and every non-Dawn theme.
+- **First dev-store run (2026-10-16)** found that the Online Store
+  publication's catalog title is "Channel Catalog <id>", not "Online
+  Store". `findOnlineStorePublication` matches the `online_store` app
+  handle instead. Still unverified: the `write_validations` scope name,
+  Liquid `app.metafields` access, the Horizon `cart:update` redraw, and
+  every non-Dawn theme.
 
 ## Open / next
 

@@ -251,14 +251,38 @@ async function syncVariants(
   return pairs.sort((a, b) => a[0] - b[0]);
 }
 
+export type PublicationNode = {
+  id: string;
+  catalog: { title: string; apps?: { nodes: { handle: string }[] } } | null;
+};
+
+// Match on the Online Store app's handle: the catalog title is localised
+// ("Onlineshop", "Boutique en ligne") and merchants can rename it. The
+// English title is only a fallback.
+export function findOnlineStorePublication(nodes: PublicationNode[]) {
+  return (
+    nodes.find((p) => p.catalog?.apps?.nodes.some((a) => a.handle === "online_store")) ??
+    nodes.find((p) => p.catalog?.title.trim().toLowerCase() === "online store")
+  );
+}
+
 async function publishToOnlineStore(admin: AdminGraphql, productId: string) {
-  const data = await gql<{ publications: { nodes: { id: string; catalog: { title: string } | null }[] } }>(
+  const data = await gql<{ publications: { nodes: PublicationNode[] } }>(
     admin,
     `#graphql
-    query SpPublications { publications(first: 50) { nodes { id catalog { title } } } }`,
+    query SpPublications {
+      publications(first: 50) {
+        nodes { id catalog { title ... on AppCatalog { apps(first: 5) { nodes { handle } } } } }
+      }
+    }`,
   );
-  const online = data.publications.nodes.find((p) => p.catalog?.title === "Online Store");
-  if (!online) throw new Error("The Online Store sales channel wasn't found — is it installed?");
+  const online = findOnlineStorePublication(data.publications.nodes);
+  if (!online) {
+    const seen = data.publications.nodes
+      .map((p) => `${p.catalog?.title ?? "(no catalog)"} [${p.catalog?.apps?.nodes.map((a) => a.handle).join(",") ?? ""}]`)
+      .join("; ");
+    throw new Error(`The Online Store sales channel wasn't found — is it installed? Publications seen: ${seen || "none"}`);
+  }
   const res = await gql<{ publishablePublish: { userErrors: UserError[] } }>(
     admin,
     `#graphql
