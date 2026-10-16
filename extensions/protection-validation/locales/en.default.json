@@ -1,0 +1,4 @@
+{
+  "name": "Shipping protection check",
+  "description": "Keeps shipping protection to one correctly priced line per order."
+}

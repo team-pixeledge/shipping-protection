@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Neon (Vercel Marketplace integration sets both): DATABASE_URL = pooled
+  // host for the serverless runtime, DATABASE_URL_UNPOOLED = direct host for
+  // `prisma migrate`. On AWS later: point both at RDS.
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// Managed by @shopify/shopify-app-session-storage-prisma — keep its shape.
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model Shop {
+  shop          String    @id // myshop.myshopify.com
+  currency      String    @default("USD") // shop currency, ISO 4217
+  installedAt   DateTime  @default(now())
+  // Set on app/uninstalled; cleared on reinstall. shop/redact deletes the row.
+  uninstalledAt DateTime?
+
+  // The merchant's settings (app/lib/settings.ts → Settings). null = never
+  // saved: protection stays off until the first save, so installing the
+  // app changes nothing on the storefront.
+  settings      Json?
+  // Bumped on every save. syncedVersion = last version pushed to Shopify
+  // (product variants, metafields, validation); they differ only while a
+  // sync failed — syncError says why.
+  version       Int       @default(0)
+  syncedVersion Int       @default(0)
+  syncError     String?
+
+  // Created by the app on first save (setup.server.ts).
+  productId     String? // gid://shopify/Product/…
+  productHandle String?
+  validationId  String? // gid://shopify/Validation/…
+
+  updatedAt DateTime @updatedAt
+
+  orders OrderRecord[]
+}
+
+// One row per order seen by orders/create — protected or not — for the
+// dashboard's attach rate and revenue. No customer data: amounts, order
+// name and the shopper's choice only. Upserted, so webhook retries are
+// harmless.
+model OrderRecord {
+  shop        String
+  orderId     String // numeric Shopify order ID
+  orderName   String // "#1001"
+  protected   Boolean
+  // "accepted" | "declined" | null (never chose: default applied or not offered)
+  choice      String?
+  // Protection charged, shop currency (0 when not protected).
+  fee         Decimal  @db.Decimal(12, 2)
+  currency    String
+  orderedAt   DateTime
+  createdAt   DateTime @default(now())
+
+  shopRef Shop @relation(fields: [shop], references: [shop], onDelete: Cascade)
+
+  @@id([shop, orderId])
+  @@index([shop, orderedAt])
+}

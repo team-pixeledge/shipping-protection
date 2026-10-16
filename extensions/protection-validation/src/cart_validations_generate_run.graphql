@@ -1,0 +1,35 @@
+query CartValidationsGenerateRunInput {
+  buyerJourney {
+    step
+  }
+  presentmentCurrencyRate
+  localization {
+    language {
+      isoCode
+    }
+  }
+  cart {
+    lines {
+      quantity
+      cost {
+        subtotalAmount {
+          amount
+        }
+      }
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          product {
+            id
+          }
+        }
+      }
+    }
+  }
+  validation {
+    metafield(namespace: "$app:shipping-protection", key: "config") {
+      jsonValue
+    }
+  }
+}

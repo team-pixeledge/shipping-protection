@@ -1,0 +1,36 @@
+{%- comment -%}
+  Shared by the app embed (sp_suffix '') and the cart block (sp_suffix
+  '-block'): the config the admin saved (app-installation metafield) plus
+  what only the storefront knows (country, currency, translations, embed
+  settings). protection.js prefers the embed's copy, so a cart block never
+  overrides the embed's settings, and boots once per page however many
+  times this renders (snippets can't share a "rendered" flag).
+{%- endcomment -%}
+{%- assign sp_config = app.metafields.shipping_protection.config.value -%}
+{%- comment -%} Loads even when switched off, so carts that still hold protection get it removed. {%- endcomment -%}
+{%- if sp_config -%}
+  <script type="application/json" id="sp-config{{ sp_suffix }}">{{ sp_config | json }}</script>
+  <script type="application/json" id="sp-env{{ sp_suffix }}">
+    {
+      "country": {{ localization.country.iso_code | json }},
+      "currency": {{ cart.currency.iso_code | json }},
+      "locale": {{ request.locale.iso_code | json }},
+      "itemCount": {{ cart.item_count | json }},
+      "placement": {{ sp_settings.placement | default: 'auto' | json }},
+      "hideLine": {{ sp_settings.hide_line | default: true, allow_false: true | json }},
+      "refresh": {{ sp_settings.refresh | default: 'auto' | json }},
+      "refreshEvent": {{ sp_settings.refresh_event | default: '' | strip | json }},
+      "t": {
+        "title": {{ 'widget.title' | t | json }},
+        "description": {{ 'widget.description' | t | json }},
+        "learnMore": {{ 'widget.learn_more' | t | json }},
+        "added": {{ 'widget.added' | t | json }}
+      }
+    }
+  </script>
+  {%- if sp_settings.accent != blank -%}
+    <style>:root { --sp-accent: {{ sp_settings.accent }}; }</style>
+  {%- endif -%}
+  {{ 'protection.css' | asset_url | stylesheet_tag }}
+  <script src="{{ 'protection.js' | asset_url }}" defer></script>
+{%- endif -%}

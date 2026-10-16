@@ -1,0 +1,56 @@
+{%- comment -%}
+  App embed (Theme settings → App embeds). Loads the widget on every page
+  so it can follow the cart drawer; with "Automatic" placement it puts the
+  toggle above each checkout button by itself.
+{%- endcomment -%}
+{%- render 'sp-boot', sp_settings: block.settings, sp_suffix: '' -%}
+
+{% schema %}
+{
+  "name": "Shipping protection",
+  "target": "body",
+  "settings": [
+    {
+      "type": "select",
+      "id": "placement",
+      "label": "Placement",
+      "options": [
+        { "value": "auto", "label": "Automatic — above checkout buttons" },
+        { "value": "blocks", "label": "Only where I add the app block" }
+      ],
+      "default": "auto"
+    },
+    {
+      "type": "checkbox",
+      "id": "hide_line",
+      "label": "Hide the protection product in the cart list",
+      "info": "The toggle shows the price instead. Some themes still count it in the cart badge.",
+      "default": true
+    },
+    {
+      "type": "color",
+      "id": "accent",
+      "label": "Accent colour",
+      "default": "#1a7f37"
+    },
+    {
+      "type": "select",
+      "id": "refresh",
+      "label": "Cart page refresh",
+      "options": [
+        { "value": "auto", "label": "Automatic" },
+        { "value": "events", "label": "Never reload the page" },
+        { "value": "reload", "label": "Always reload the page" }
+      ],
+      "default": "auto",
+      "info": "Automatic reloads the cart page only when your theme can't update its totals in place."
+    },
+    {
+      "type": "text",
+      "id": "refresh_event",
+      "label": "Custom refresh event (advanced)",
+      "info": "If your theme's cart drawer doesn't update its total, enter the event your theme listens for — e.g. cart:refresh."
+    }
+  ]
+}
+{% endschema %}

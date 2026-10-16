@@ -1,0 +1,25 @@
+{%- comment -%}
+  App block for the cart page (or a cart drawer section that accepts app
+  blocks). Marks where the toggle goes; protection.js fills it.
+{%- endcomment -%}
+{%- render 'sp-boot', sp_settings: nil, sp_suffix: '-block' -%}
+<div data-sp-slot {{ block.shopify_attributes }} style="margin: {{ block.settings.margin }}px 0"></div>
+
+{% schema %}
+{
+  "name": "Shipping protection",
+  "target": "section",
+  "settings": [
+    {
+      "type": "range",
+      "id": "margin",
+      "label": "Space above and below",
+      "min": 0,
+      "max": 40,
+      "step": 4,
+      "unit": "px",
+      "default": 12
+    }
+  ]
+}
+{% endschema %}

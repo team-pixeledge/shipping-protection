@@ -1,0 +1,57 @@
+# PRODUCTION app config. Not linked yet: create the app in the Dev Dashboard
+# (Partners → Apps → Create app → "Create app manually"), then run
+# `npm run config:link` — it fills client_id. Add a shopify.app.staging.toml
+# (separate app + client_id) before launch; never share one client_id
+# between environments.
+#
+# WARNING: `shopify app config link` rewrites this whole file from the
+# Dashboard's current state (drops webhooks and these comments). After any
+# link, `git diff` this file and restore before deploying.
+name = "Shipping Protection"
+client_id = "REPLACE_WITH_CLIENT_ID"
+application_url = "https://shipping-protection.vercel.app"
+embedded = true
+
+[build]
+# Must stay false: true lets `shopify app dev` replace the production
+# application_url with a throwaway tunnel while a dev session runs.
+automatically_update_urls_on_dev = false
+
+[access_scopes]
+# write_products: create the hidden protection product and its price
+#   variants (read_products comes with it).
+# read_publications + write_publications: publish that product to the
+#   Online Store, or /cart/add.js can't add it.
+# read_orders + write_orders: orders/create webhook; write the
+#   shipping_protection.details metafield and the tag on each order.
+#   Protected customer data: request Level 1 in the Partner Dashboard (we
+#   read no name/email/phone/address fields, store none).
+# read_themes: Home checks whether the app embed is on in the live theme.
+# write_validations: create/update the checkout rule (validationCreate).
+scopes = "write_products,read_publications,write_publications,read_orders,write_orders,read_themes,write_validations"
+
+[auth]
+redirect_urls = ["https://shipping-protection.vercel.app/auth/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  topics = ["app/scopes_update"]
+  uri = "/webhooks/app/scopes_update"
+
+  [[webhooks.subscriptions]]
+  topics = ["orders/create"]
+  uri = "/webhooks/orders/create"
+
+  # Mandatory for public apps.
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "/webhooks/compliance"
+
+[pos]
+embedded = false
