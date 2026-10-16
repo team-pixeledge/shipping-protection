@@ -1,15 +1,15 @@
-# PRODUCTION app config. Not linked yet: create the app in the Dev Dashboard
-# (Partners → Apps → Create app → "Create app manually"), then run
-# `npm run config:link` — it fills client_id. Add a shopify.app.staging.toml
-# (separate app + client_id) before launch; never share one client_id
-# between environments.
+# PRODUCTION app config — the SafeShip app in the Dev Dashboard, hosted on the
+# Vercel project `shipping-protection` (https://safeship-app.vercel.app; the
+# plain shipping-protection.vercel.app belongs to another account). Add a
+# shopify.app.staging.toml (separate app + client_id) before launch; never
+# share one client_id between environments.
 #
 # WARNING: `shopify app config link` rewrites this whole file from the
 # Dashboard's current state (drops webhooks and these comments). After any
 # link, `git diff` this file and restore before deploying.
-name = "Shipping Protection"
-client_id = "REPLACE_WITH_CLIENT_ID"
-application_url = "https://shipping-protection.vercel.app"
+name = "SafeShip: Shipping Protection"
+client_id = "8ebb141083f3d407cc21fbe93359c287"
+application_url = "https://safeship-app.vercel.app"
 embedded = true
 
 [build]
@@ -31,7 +31,7 @@ automatically_update_urls_on_dev = false
 scopes = "write_products,read_publications,write_publications,read_orders,write_orders,read_themes,write_validations"
 
 [auth]
-redirect_urls = ["https://shipping-protection.vercel.app/auth/callback"]
+redirect_urls = ["https://safeship-app.vercel.app/auth/callback"]
 
 [webhooks]
 api_version = "2026-10"
