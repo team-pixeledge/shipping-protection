@@ -13,6 +13,7 @@ import {
   type Tier,
 } from "../../shared/pricing";
 import { DEFAULT_CLAIM_SETTINGS, parseClaimSettings, type ClaimSettings } from "./claims";
+import { DEFAULT_TRACKING_SETTINGS, parseTrackingSettings, type TrackingSettings } from "./tracking";
 
 export interface Settings {
   enabled: boolean;
@@ -29,6 +30,8 @@ export interface Settings {
   coverage: Coverage;
   /** Titles of coverage.productIds, for the settings page only. */
   coverageProductTitles: Record<string, string>;
+  /** When a package counts as stalled, late or possibly lost (./tracking.ts). */
+  tracking: TrackingSettings;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -43,6 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   claims: DEFAULT_CLAIM_SETTINGS,
   coverage: DEFAULT_COVERAGE,
   coverageProductTitles: {},
+  tracking: DEFAULT_TRACKING_SETTINGS,
 };
 
 const num = (v: unknown, fallback: number) => {
@@ -128,6 +132,7 @@ export function parseSettings(raw: unknown): Settings {
     claims: parseClaimSettings(o.claims),
     coverage: parseCoverage(o.coverage),
     coverageProductTitles: titles(o.coverageProductTitles, parseCoverage(o.coverage).productIds),
+    tracking: parseTrackingSettings(o.tracking),
   };
 }
 

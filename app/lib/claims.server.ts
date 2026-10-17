@@ -1,11 +1,15 @@
 // Claims: reading the order from Shopify, filing, status changes and the
 // emails that go with them. The rules themselves are in ./claims.ts.
+import { createHmac } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
 import { signToken } from "./claim-token.server";
 import {
   canTransition,
+  claimFlags,
+  claimTrackingNumbers,
   formatClaimNumber,
+  type ClaimSettings,
   RESOLUTION_LABELS,
   TYPE_LABELS,
   type ClaimItem,
@@ -17,6 +21,9 @@ import {
 import { claimReceivedEmail, claimUpdateEmail, merchantClaimEmail, sendEmail } from "./email.server";
 import { parseSettings } from "./settings";
 import type { AdminGraphql } from "./setup.server";
+import { claimLocale } from "./i18n";
+import { FULFILLMENT_FIELDS, toShipment, type FulfillmentNode } from "./tracking.server";
+import type { TrackingSettings } from "./tracking";
 
 const numericId = (gid: string | null | undefined) => (gid ? (gid.split("/").pop() ?? null) : null);
 
@@ -31,7 +38,7 @@ async function gql<T>(admin: AdminGraphql, query: string, variables?: Record<str
 
 const ORDER_FIELDS = `#graphql
   fragment SpClaimOrderFields on Order {
-    id name email createdAt cancelledAt currencyCode
+    id name email createdAt cancelledAt currencyCode customerLocale
     customer { id }
     lineItems(first: 100) {
       nodes {
@@ -42,10 +49,7 @@ const ORDER_FIELDS = `#graphql
         image { url(transform: { maxWidth: 160, maxHeight: 160 }) }
       }
     }
-    fulfillments(first: 20) {
-      createdAt displayStatus deliveredAt status
-      trackingInfo { number company url }
-    }
+    fulfillments(first: 50) { ${FULFILLMENT_FIELDS} }
   }`;
 
 interface OrderNode {
@@ -55,6 +59,7 @@ interface OrderNode {
   createdAt: string;
   cancelledAt: string | null;
   currencyCode: string;
+  customerLocale: string | null;
   customer: { id: string } | null;
   lineItems: {
     nodes: {
@@ -70,13 +75,7 @@ interface OrderNode {
       image: { url: string } | null;
     }[];
   };
-  fulfillments: {
-    createdAt: string;
-    displayStatus: string | null;
-    deliveredAt: string | null;
-    status: string;
-    trackingInfo: { number: string | null; company: string | null; url: string | null }[];
-  }[];
+  fulfillments: FulfillmentNode[];
 }
 
 /** Pure: Shopify's order → what the claims flow needs. Cancelled/failed fulfillments aren't shipments. */
@@ -89,6 +88,7 @@ export function toClaimOrder(o: OrderNode): ClaimOrder {
     createdAt: o.createdAt,
     cancelled: !!o.cancelledAt,
     currency: o.currencyCode,
+    locale: o.customerLocale,
     lines: o.lineItems.nodes.map((l) => ({
       id: l.id,
       title: l.title,
@@ -106,13 +106,51 @@ export function toClaimOrder(o: OrderNode): ClaimOrder {
     })),
     shipments: o.fulfillments
       .filter((f) => !["CANCELLED", "ERROR", "FAILURE"].includes(f.status))
-      .map((f) => ({
-        status: f.displayStatus ?? f.status,
-        shippedAt: f.createdAt,
-        deliveredAt: f.deliveredAt,
-        tracking: f.trackingInfo,
-      })),
+      .map((f) => {
+        const s = toShipment(f);
+        return {
+          id: s.id,
+          status: s.status,
+          shippedAt: s.shippedAt,
+          deliveredAt: s.deliveredAt,
+          estimatedDeliveryAt: s.estimatedDeliveryAt,
+          lastEventAt: s.lastEventAt,
+          tracking: s.tracking,
+          lineItemIds: s.lineItemIds,
+        };
+      }),
+    fulfillments: o.fulfillments,
   };
+}
+
+/**
+ * A keyed hash of the order's shipping address (street, postcode, country,
+ * normalised), for "other claims to this address" — the address itself is
+ * never stored. Reading it needs protected customer data (address); without
+ * that access this returns null and the check is skipped.
+ */
+export async function shippingAddressHash(admin: AdminGraphql, orderId: string): Promise<string | null> {
+  try {
+    const data = await gql<{ order: { shippingAddress: { address1: string | null; address2: string | null; zip: string | null; countryCodeV2: string | null } | null } | null }>(
+      admin,
+      `#graphql
+      query SpClaimAddress($id: ID!) { order(id: $id) { shippingAddress { address1 address2 zip countryCodeV2 } } }`,
+      { id: `gid://shopify/Order/${orderId}` },
+    );
+    return addressHash(data.order?.shippingAddress ?? null);
+  } catch {
+    return null;
+  }
+}
+
+export function addressHash(
+  a: { address1: string | null; address2: string | null; zip: string | null; countryCodeV2: string | null } | null,
+  secret = process.env.SHOPIFY_API_SECRET ?? "",
+): string | null {
+  if (!a?.address1 || !secret) return null;
+  const norm = (s: string | null) => (s ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const key = [norm(a.address1), norm(a.address2), norm(a.zip), norm(a.countryCodeV2)].join("|");
+  return createHmac("sha256", secret).update(key).digest("hex").slice(0, 32);
 }
 
 /**
@@ -165,6 +203,60 @@ export async function orderIsProtected(shop: string, order: ClaimOrder) {
   if (row?.productId && order.lines.some((l) => l.productId === row.productId)) return true;
   const rec = await prisma.orderRecord.findUnique({ where: { shop_orderId: { shop, orderId: order.id } } });
   return rec?.protected ?? false;
+}
+
+/**
+ * The review flags for a new claim, from the order, its packages and the
+ * shop's other claims (12 months), plus what's stored for later matching.
+ * Shared by the claims page and staff-created claims.
+ */
+export async function assessClaim(
+  admin: AdminGraphql,
+  c: {
+    shop: string;
+    order: ClaimOrder;
+    type: ClaimType;
+    email: string;
+    isProtected: boolean;
+    items: ClaimItem[];
+    amount: number;
+    settings: ClaimSettings;
+    tracking: TrackingSettings;
+    now: Date;
+  },
+) {
+  const { shop, order } = c;
+  const year = new Date(c.now.getTime() - 365 * 86_400_000);
+  const lineItemIds = c.items.map((i) => i.lineItemId);
+  const trackingNumbers = claimTrackingNumbers(order, lineItemIds);
+  const addressHash = await shippingAddressHash(admin, order.id);
+  const email = c.email.trim().toLowerCase();
+  const [otherClaimsByEmail, otherClaimsByAddress, duplicate] = await Promise.all([
+    prisma.claim.count({ where: { shop, email, orderId: { not: order.id }, createdAt: { gte: year } } }),
+    addressHash
+      ? prisma.claim.count({ where: { shop, addressHash, orderId: { not: order.id }, createdAt: { gte: year } } })
+      : 0,
+    trackingNumbers.length
+      ? prisma.claim.findFirst({
+          where: { shop, orderId: { not: order.id }, trackingNumbers: { hasSome: trackingNumbers } },
+          select: { id: true },
+        })
+      : null,
+  ]);
+  const flags = claimFlags({
+    order,
+    type: c.type,
+    isProtected: c.isProtected,
+    lineItemIds,
+    amount: c.amount,
+    settings: c.settings,
+    tracking: c.tracking,
+    otherClaimsByEmail,
+    otherClaimsByAddress,
+    duplicateTracking: !!duplicate,
+    now: c.now,
+  });
+  return { flags, trackingNumbers, addressHash };
 }
 
 // ---- Links ----
@@ -222,6 +314,12 @@ export interface NewClaim {
   isProtected: boolean;
   flags: string[];
   files: { pathname: string; name: string; contentType: string; size: number }[];
+  trackingNumbers: string[];
+  addressHash: string | null;
+  /** STAFF: created in the admin (the first event says so). */
+  source?: "CUSTOMER" | "STAFF";
+  /** Internal note on a staff-created claim. */
+  staffNote?: string | null;
 }
 
 /** Creates the claim with the next per-shop number (retries if two land at once). */
@@ -245,10 +343,22 @@ export async function createClaim(c: NewClaim) {
             currency: c.order.currency,
             protected: c.isProtected,
             flags: c.flags,
+            trackingNumbers: c.trackingNumbers,
+            addressHash: c.addressHash,
+            locale: claimLocale(c.order.locale),
+            source: c.source ?? "CUSTOMER",
             shipments: c.order.shipments as unknown as Prisma.InputJsonValue,
             events: {
               create: [
-                { actor: "CUSTOMER", kind: "SUBMITTED", status: "OPEN", message: c.description },
+                {
+                  actor: c.source === "STAFF" ? "MERCHANT" : "CUSTOMER",
+                  kind: "SUBMITTED",
+                  status: "OPEN",
+                  message: c.description,
+                },
+                ...(c.staffNote
+                  ? [{ actor: "MERCHANT", kind: "NOTE", message: c.staffNote, internal: true }]
+                  : []),
                 ...(c.files.length
                   ? [{ actor: "CUSTOMER", kind: "FILES", message: c.files.map((f) => f.name).join(", ") }]
                   : []),
@@ -266,11 +376,15 @@ export async function createClaim(c: NewClaim) {
 }
 
 /** Emails after filing: confirmation to the customer, alert to the merchant. */
-export async function notifyNewClaim(admin: AdminGraphql, claimId: string) {
-  await afterSave(claimId, "New-claim emails", () => sendNewClaimEmails(admin, claimId));
+export async function notifyNewClaim(
+  admin: AdminGraphql,
+  claimId: string,
+  to: { customer: boolean; merchant: boolean } = { customer: true, merchant: true },
+) {
+  await afterSave(claimId, "New-claim emails", () => sendNewClaimEmails(admin, claimId, to));
 }
 
-async function sendNewClaimEmails(admin: AdminGraphql, claimId: string) {
+async function sendNewClaimEmails(admin: AdminGraphql, claimId: string, to: { customer: boolean; merchant: boolean }) {
   const claim = await prisma.claim.findUniqueOrThrow({ where: { id: claimId }, include: { shopRef: true } });
   const store = await storeProfile(admin);
   const settings = parseSettings(claim.shopRef.settings).claims;
@@ -280,15 +394,18 @@ async function sendNewClaimEmails(admin: AdminGraphql, claimId: string) {
     orderName: claim.orderName,
     statusUrl: claimStatusUrl(claim.shop, claim.shopRef.portalPath, claim.id),
   };
-  const toCustomer = claimReceivedEmail(ctx);
-  const sentCustomer = await sendEmail({
-    storeName: store.name,
-    to: claim.email,
-    replyTo: store.contactEmail ?? store.email,
-    ...toCustomer,
-    idempotencyKey: `claim-received-${claim.id}`,
-  });
-  await logEmail(claim.id, "Confirmation", claim.email, sentCustomer);
+  if (to.customer) {
+    const toCustomer = claimReceivedEmail(ctx);
+    const sentCustomer = await sendEmail({
+      storeName: store.name,
+      to: claim.email,
+      replyTo: store.contactEmail ?? store.email,
+      ...toCustomer,
+      idempotencyKey: `claim-received-${claim.id}`,
+    });
+    await logEmail(claim.id, "Confirmation", claim.email, sentCustomer);
+  }
+  if (!to.merchant) return;
 
   const merchantTo = settings.notifyEmail || store.email;
   const summary = `${TYPE_LABELS[claim.type as ClaimType]} — ${claim.currency} ${claim.amount.toFixed(2)} claimed.\n\n${claim.description}`;

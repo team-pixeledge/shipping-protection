@@ -14,6 +14,8 @@ import {
   TYPE_LABELS,
   type ClaimStatus,
   type ClaimType,
+  PRIORITY_LABELS,
+  reviewPriority,
 } from "../lib/claims";
 import { ensureShop } from "../lib/shop.server";
 import { parseSettings } from "../lib/settings";
@@ -52,7 +54,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       status: c.status as ClaimStatus,
       amount: Number(c.amount),
       currency: c.currency,
-      flags: c.flags.length,
+      priority: reviewPriority(c.flags, c.dismissedFlags),
+      staff: c.source === "STAFF",
       at: c.createdAt.toISOString(),
     })),
   };
@@ -92,6 +95,9 @@ export default function Claims() {
 
   return (
     <s-page heading="Claims">
+      <s-button slot="primary-action" href="/app/claims/new">
+        Create claim
+      </s-button>
       <s-button slot="secondary-actions" onClick={() => exportCsv(365)} {...(exporting ? { loading: true } : {})}>
         Export last 12 months (CSV)
       </s-button>
@@ -142,10 +148,16 @@ export default function Claims() {
                 <s-table-row key={c.id}>
                   <s-table-cell>
                     <s-link href={`/app/claims/${c.id}`}>{formatClaimNumber(c.number)}</s-link>
-                    {c.flags > 0 && (
+                    {c.priority !== "LOW" && (
                       <>
                         {" "}
-                        <s-badge tone="caution">{c.flags === 1 ? "1 flag" : `${c.flags} flags`}</s-badge>
+                        <s-badge tone={c.priority === "HIGH" ? "warning" : "caution"}>{PRIORITY_LABELS[c.priority]}</s-badge>
+                      </>
+                    )}
+                    {c.staff && (
+                      <>
+                        {" "}
+                        <s-badge>Created by staff</s-badge>
                       </>
                     )}
                   </s-table-cell>

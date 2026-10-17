@@ -62,8 +62,9 @@ model Shop {
 
   updatedAt DateTime @updatedAt
 
-  orders OrderRecord[]
-  claims Claim[]
+  orders    OrderRecord[]
+  claims    Claim[]
+  shipments Shipment[]
 }
 
 // One row per order seen by orders/create — protected or not — for the
@@ -81,6 +82,9 @@ model OrderRecord {
   fee         Decimal  @db.Decimal(12, 2)
   currency    String
   orderedAt   DateTime
+  // Last time the daily sync looked for this order's packages (protected
+  // orders whose fulfillment webhooks we may have missed).
+  trackedAt   DateTime?
   createdAt   DateTime @default(now())
 
   shopRef Shop @relation(fields: [shop], references: [shop], onDelete: Cascade)
@@ -118,6 +122,17 @@ model Claim {
   flags       String[]
   // Shipping snapshot at filing time: [{ status, tracking: [{ number, company, url }], shippedAt, deliveredAt }]
   shipments   Json
+  // Flags the merchant marked as false positives (still listed, struck through).
+  dismissedFlags String[] @default([])
+  // Normalised tracking numbers of the claimed packages — duplicate checks.
+  trackingNumbers String[] @default([])
+  // HMAC of the normalised shipping address (never the address itself) —
+  // repeat-address checks. null when the address couldn't be read.
+  addressHash String?
+  // The customer's language (the order's customer locale): claims page and emails.
+  locale      String   @default("en")
+  // CUSTOMER (claims page) | STAFF (created in the admin).
+  source      String   @default("CUSTOMER")
   // Recorded on approval: REFUND | REPLACEMENT | STORE_CREDIT | OTHER.
   // Phase 1 only records the decision; the merchant carries it out in Shopify.
   resolution  String?
@@ -140,6 +155,7 @@ model Claim {
   @@index([shop, status, createdAt])
   @@index([shop, orderId])
   @@index([shop, email])
+  @@index([shop, addressHash])
 }
 
 // The claim's history: every status change, message, note and email.
@@ -204,4 +220,51 @@ model ClaimResolution {
 
   @@index([claimId])
   @@index([status, completedAt])
+}
+
+// One package (a Shopify fulfillment) of a protected or claimed order, kept
+// up to date by the fulfillment webhooks and the daily sync
+// (app/lib/tracking.server.ts). No customer data: carrier facts only.
+model Shipment {
+  shop          String
+  fulfillmentId String // numeric
+  orderId       String
+  orderName     String
+  // Shopify's displayStatus (IN_TRANSIT, DELIVERED, …) and our stage (app/lib/tracking.ts).
+  status        String
+  stage         String
+  tracking      Json // [{ number, company, url }]
+  trackingNumbers String[] @default([]) // normalised, for duplicate checks
+  lineItemIds   String[] @default([])
+  shippedAt     DateTime
+  inTransitAt   DateTime?
+  deliveredAt   DateTime?
+  estimatedDeliveryAt DateTime?
+  // The carrier's latest event (null: the carrier reports none).
+  lastEventAt   DateTime?
+  lastEventStatus String?
+  flags         String[] @default([])
+  // When the flags last changed (newest problems first in the admin).
+  flaggedAt     DateTime?
+  checkedAt     DateTime @default(now())
+  // Delivered, cancelled or followed long enough: the daily sync skips it.
+  closedAt      DateTime?
+  updatedAt     DateTime @updatedAt
+
+  shopRef Shop @relation(fields: [shop], references: [shop], onDelete: Cascade)
+
+  @@id([shop, fulfillmentId])
+  @@index([shop, orderId])
+  @@index([shop, closedAt, shippedAt])
+  @@index([closedAt, checkedAt])
+}
+
+// Fixed-window counters for the storefront order lookup (and anything else
+// a stranger can hammer). Expired rows are deleted by the daily job.
+model RateLimit {
+  key     String   @id
+  count   Int      @default(0)
+  resetAt DateTime
+
+  @@index([resetAt])
 }

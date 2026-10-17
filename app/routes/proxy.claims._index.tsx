@@ -11,8 +11,8 @@ import { uploadsConfigured } from "../lib/blob.server";
 import {
   buildClaimItems,
   claimableLines,
-  claimFlags,
   evidencePrefix,
+  limitProblem,
   isClaimType,
   normalizeOrderName,
   orderEligibility,
@@ -27,8 +27,11 @@ import {
   findOrdersByName,
   getOrder,
   notifyNewClaim,
+  assessClaim,
   orderIsProtected,
 } from "../lib/claims.server";
+import { storeShipments, type FulfillmentNode } from "../lib/tracking.server";
+import { parseSettings } from "../lib/settings";
 import { claimFormPage, ineligiblePage, lookupPage, statusPage, unavailablePage } from "../lib/portal-pages";
 import { proxyContext, verifiedFiles } from "../lib/proxy.server";
 
@@ -163,7 +166,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 uploadsConfigured() &&
                 !files.some((f) => f.contentType.startsWith("image/"))
               ? "Please add at least one photo of the damage."
-              : null);
+              : type !== "DAMAGED" && settings.evidenceForLostStolen && uploadsConfigured() && !files.length
+                ? "Please add a supporting document, such as a police report or a carrier's reply."
+                : null);
   if (problem) {
     return render(
       formFor(order, rawToken, proof.email, { error: problem, values: { type, description, picked } }),
@@ -171,7 +176,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     );
   }
 
-  const otherClaims = await prisma.claim.count({ where: { shop, email: proof.email, orderId: { not: order.id } } });
+  // Value limits: what this order and this customer already claimed (not rejected).
+  const year = new Date(now.getTime() - 365 * 86_400_000);
+  const [onOrder, byCustomer] = await Promise.all([
+    prisma.claim.aggregate({ where: { shop, orderId: order.id, status: { not: "REJECTED" } }, _sum: { amount: true } }),
+    prisma.claim.aggregate({
+      where: { shop, email: proof.email, status: { not: "REJECTED" }, createdAt: { gte: year } },
+      _sum: { amount: true },
+    }),
+  ]);
+  const overLimit = limitProblem(amount, Number(onOrder._sum.amount ?? 0), Number(byCustomer._sum.amount ?? 0), settings);
+  if (overLimit) return render(ineligiblePage({ ...opts, orderName: order.name, reason: overLimit }));
+
+  const tracking = parseSettings(ctx.row!.settings).tracking;
+  const risk = await assessClaim(admin, {
+    shop,
+    order,
+    type: type as ClaimType,
+    email: proof.email,
+    isProtected,
+    items,
+    amount,
+    settings,
+    tracking,
+    now,
+  });
   const claim = await createClaim({
     shop,
     order,
@@ -181,9 +210,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     items,
     amount,
     isProtected,
-    flags: claimFlags(order, type as ClaimType, isProtected, otherClaims),
+    flags: risk.flags,
     files,
+    trackingNumbers: risk.trackingNumbers,
+    addressHash: risk.addressHash,
   });
+  // Follow this order's packages from now on (it may not have bought protection).
+  await storeShipments(shop, order, (order.fulfillments ?? []) as FulfillmentNode[], tracking).catch(
+    (err) => console.error(`[claims] storing shipments for ${order.name}:`, err),
+  );
   await notifyNewClaim(admin, claim.id);
 
   const token = signToken({ p: "claim", shop, id: claim.id });

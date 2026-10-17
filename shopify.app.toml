@@ -26,9 +26,11 @@ automatically_update_urls_on_dev = false
 #   shipping_protection.details metafield and the tag on each order.
 #   Protected customer data: request Level 1 in the Partner Dashboard (we
 #   read no name/email/phone/address fields, store none).
+# read_fulfillments: fulfillments/* and fulfillment_events/create webhooks —
+#   shipment tracking for protected orders (Shipments page, claim flags).
 # read_themes: Home checks whether the app embed is on in the live theme.
 # write_validations: create/update the checkout rule (validationCreate).
-scopes = "write_products,read_publications,write_publications,read_orders,write_orders,read_themes,write_validations"
+scopes = "write_products,read_publications,write_publications,read_orders,write_orders,read_fulfillments,read_themes,write_validations"
 # Optional — asked for only when a merchant first uses the feature (App
 # Bridge shopify.scopes.request on the claim page), so they're NOT in the
 # SCOPES env var:
@@ -53,6 +55,11 @@ api_version = "2026-10"
   [[webhooks.subscriptions]]
   topics = ["orders/create"]
   uri = "/webhooks/orders/create"
+
+  # Shipment tracking (app/routes/webhooks.fulfillments.tsx).
+  [[webhooks.subscriptions]]
+  topics = ["fulfillments/create", "fulfillments/update", "fulfillment_events/create"]
+  uri = "/webhooks/fulfillments"
 
   # Mandatory for public apps.
   [[webhooks.subscriptions]]

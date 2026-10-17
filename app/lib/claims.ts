@@ -1,4 +1,13 @@
 import { lineCovered, matchesTags, type Coverage } from "../../shared/pricing";
+import {
+  FOLLOW_DAYS,
+  isOpenStage,
+  shipmentFlags,
+  stageOf,
+  trackingNumbersOf,
+  type TrackingNumber,
+  type TrackingSettings,
+} from "./tracking";
 
 // Claims: the rules, with no I/O. Shared by the storefront claims page
 // (app/routes/proxy.*), the admin (app/routes/app.claims*) and the settings
@@ -39,13 +48,43 @@ export const RESOLUTION_LABELS: Record<Resolution, string> = {
   STORE_CREDIT: "Store credit",
   OTHER: "Other",
 };
+/**
+ * Review hints on a claim. WARNING flags are reasons to look closer;
+ * SUPPORT flags are carrier data that backs the customer's story. Neither
+ * is a verdict, and a customer is never labelled fraudulent by them.
+ */
 export const FLAG_LABELS: Record<string, string> = {
   NO_PROTECTION: "No protection on this order",
   MARKED_DELIVERED: "Reported lost, but the carrier marked it delivered",
   NOT_MARKED_DELIVERED: "Reported stolen, but the carrier hasn't marked it delivered",
   NO_TRACKING: "No tracking number",
-  PRIOR_CLAIMS: "This customer has other claims",
+  PRIOR_CLAIMS: "This customer has filed other claims in the last 12 months",
+  REPEAT_ADDRESS: "Other claims were filed for the same shipping address in the last 12 months",
+  DUPLICATE_TRACKING: "The same tracking number is on a claim for another order",
+  HIGH_VALUE: "High claim value",
+  EARLY_LOST: "Reported lost while the carrier still shows it moving",
+  CARRIER_EXCEPTION: "Carrier reports a delivery problem",
+  CARRIER_LATE: "Carrier is past its estimated delivery date",
+  CARRIER_STALLED: "No carrier update for a while",
+  CARRIER_POSSIBLY_LOST: "Not delivered long after shipping",
+  OUTSIDE_POLICY: "Created by staff outside the online claim rules",
 };
+export const SUPPORT_FLAGS = ["CARRIER_EXCEPTION", "CARRIER_LATE", "CARRIER_STALLED", "CARRIER_POSSIBLY_LOST"];
+export const isSupportFlag = (f: string) => SUPPORT_FLAGS.includes(f);
+
+export type ReviewPriority = "LOW" | "MEDIUM" | "HIGH";
+export const PRIORITY_LABELS: Record<ReviewPriority, string> = {
+  LOW: "Routine",
+  MEDIUM: "Check details",
+  HIGH: "Review carefully",
+};
+const STRONG_FLAGS = ["DUPLICATE_TRACKING", "MARKED_DELIVERED"];
+/** How closely to look, from the warning flags the merchant hasn't dismissed. */
+export function reviewPriority(flags: string[], dismissed: string[] = []): ReviewPriority {
+  const active = flags.filter((f) => !isSupportFlag(f) && !dismissed.includes(f));
+  if (active.some((f) => STRONG_FLAGS.includes(f)) || active.length >= 2) return "HIGH";
+  return active.length ? "MEDIUM" : "LOW";
+}
 
 /** Which status changes the merchant may make. Reopening needs a reason. */
 const TRANSITIONS: Record<ClaimStatus, ClaimStatus[]> = {
@@ -81,6 +120,18 @@ export interface ClaimSettings {
   notifyEmail: string;
   /** Shown on the claims page above the form. Plain text. */
   policy: string;
+  /** The claim window counts from shipping, or from delivery once delivered. */
+  windowFrom: "SHIPPED" | "DELIVERED";
+  /** Lost and stolen claims need at least one file (e.g. a police report). */
+  evidenceForLostStolen: boolean;
+  /** Most that can be claimed online per order, all claims together (0 = no limit). */
+  maxValuePerOrder: number;
+  /** Most one customer (email) can claim online in 12 months (0 = no limit). */
+  maxValuePerCustomer: number;
+  /** Flag a customer or address with this many claims in 12 months, this one included. */
+  repeatThreshold: number;
+  /** Flag claims worth at least this much (0 = off). */
+  highValue: number;
 }
 
 export const DEFAULT_CLAIM_SETTINGS: ClaimSettings = {
@@ -93,11 +144,21 @@ export const DEFAULT_CLAIM_SETTINGS: ClaimSettings = {
   maxPerOrder: 1,
   notifyEmail: "",
   policy: "",
+  windowFrom: "SHIPPED",
+  evidenceForLostStolen: false,
+  maxValuePerOrder: 0,
+  maxValuePerCustomer: 0,
+  repeatThreshold: 2,
+  highValue: 0,
 };
 
 const int = (v: unknown, fallback: number, min: number, max: number) => {
   const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
   return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+};
+const money = (v: unknown) => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.min(1e9, Math.round(n * 100) / 100) : 0;
 };
 const EMAIL_RE = /^[^\s@<>",]+@[^\s@<>",]+\.[^\s@<>",]+$/;
 export const isEmail = (s: string) => s.length <= 254 && EMAIL_RE.test(s);
@@ -116,6 +177,12 @@ export function parseClaimSettings(raw: unknown): ClaimSettings {
     maxPerOrder: int(o.maxPerOrder, d.maxPerOrder, 1, 10),
     notifyEmail: isEmail(email) ? email : "",
     policy: typeof o.policy === "string" ? o.policy.trim().slice(0, 2000) : "",
+    windowFrom: o.windowFrom === "DELIVERED" ? "DELIVERED" : "SHIPPED",
+    evidenceForLostStolen: o.evidenceForLostStolen === true,
+    maxValuePerOrder: money(o.maxValuePerOrder),
+    maxValuePerCustomer: money(o.maxValuePerCustomer),
+    repeatThreshold: int(o.repeatThreshold, d.repeatThreshold, 2, 20),
+    highValue: money(o.highValue),
   };
 }
 
@@ -143,7 +210,15 @@ export interface Shipment {
   status: string; // displayStatus: IN_TRANSIT, DELIVERED, …
   shippedAt: string;
   deliveredAt: string | null;
-  tracking: { number: string | null; company: string | null; url: string | null }[];
+  tracking: TrackingNumber[];
+  // Added with tracking (phase 3); missing on claims filed before it.
+  /** Numeric fulfillment ID. */
+  id?: string;
+  estimatedDeliveryAt?: string | null;
+  /** The carrier's latest event (null when the carrier reports none). */
+  lastEventAt?: string | null;
+  /** The order lines in this package (gid://shopify/LineItem/…). */
+  lineItemIds?: string[];
 }
 
 export interface ClaimOrder {
@@ -154,8 +229,12 @@ export interface ClaimOrder {
   createdAt: string;
   cancelled: boolean;
   currency: string; // shop currency
+  /** The language the customer shopped in (e.g. "fr", "pt-BR"), if known. */
+  locale?: string | null;
   lines: OrderLine[];
   shipments: Shipment[];
+  /** Raw fulfillments, to store as tracked packages (claims.server.ts). */
+  fulfillments?: unknown[];
 }
 
 /** "#1001", " 1001", "#SL-1001" → comparable form. */
@@ -218,14 +297,30 @@ export function orderEligibility(
   if (!order.shipments.length) {
     return { ok: false, reason: "This order hasn't shipped yet. You can file a claim once it's on its way." };
   }
-  const lastShipped = order.shipments.map((s) => s.shippedAt).sort().at(-1)!;
-  if (daysBetween(lastShipped, now) > settings.windowDays) {
+  const start = windowStart(order, settings, now);
+  if (daysBetween(start, now) > settings.windowDays) {
+    const from = settings.windowFrom === "DELIVERED" ? "delivery" : "shipping";
     return {
       ok: false,
-      reason: `Claims must be filed within ${settings.windowDays} days of shipping. Please contact the store.`,
+      reason: `Claims must be filed within ${settings.windowDays} days of ${from}. Please contact the store.`,
     };
   }
   return { ok: true };
+}
+
+/**
+ * Where the claim window starts: the last shipment's date, or with
+ * windowFrom DELIVERED the last delivery once every package has arrived.
+ */
+export function windowStart(order: ClaimOrder, settings: ClaimSettings, now: Date): string {
+  const lastShipped = order.shipments.map((s) => s.shippedAt).sort().at(-1)!;
+  if (settings.windowFrom !== "DELIVERED") return lastShipped;
+  // Not everything arrived: open while a package could still be lost, up to
+  // FOLLOW_DAYS after shipping.
+  if (order.shipments.some((s) => !s.deliveredAt)) {
+    return daysBetween(lastShipped, now) <= FOLLOW_DAYS ? now.toISOString() : lastShipped;
+  }
+  return order.shipments.map((s) => s.deliveredAt!).sort().at(-1)!;
 }
 
 /** Type-specific check: lost packages may need some days in transit first. */
@@ -243,16 +338,99 @@ export function typeProblem(order: ClaimOrder, type: ClaimType, settings: ClaimS
   return null;
 }
 
+/** The packages a claim is about: those holding a claimed line, else all of them. */
+export function claimedShipments(order: ClaimOrder, lineItemIds: string[]): Shipment[] {
+  const known = order.shipments.filter((s) => s.lineItemIds?.length);
+  if (!known.length || !lineItemIds.length) return order.shipments;
+  const hit = known.filter((s) => s.lineItemIds!.some((id) => lineItemIds.includes(id)));
+  return hit.length ? hit : order.shipments;
+}
+
+export interface RiskInput {
+  order: ClaimOrder;
+  type: ClaimType;
+  isProtected: boolean;
+  /** The claimed lines, to pick the packages that matter. */
+  lineItemIds: string[];
+  amount: number;
+  settings: ClaimSettings;
+  tracking: TrackingSettings;
+  /** This customer's other claims (by email) in the last 12 months. */
+  otherClaimsByEmail: number;
+  /** Other claims for the same shipping address in the last 12 months. */
+  otherClaimsByAddress: number;
+  /** Another order's claim has one of these tracking numbers. */
+  duplicateTracking: boolean;
+  now: Date;
+}
+
 /** Hints for the merchant's review. Never a verdict. */
-export function claimFlags(order: ClaimOrder, type: ClaimType, isProtected: boolean, otherClaimsByEmail: number) {
+export function claimFlags(r: RiskInput): string[] {
   const flags: string[] = [];
-  if (!isProtected) flags.push("NO_PROTECTION");
-  const delivered = order.shipments.filter((s) => s.deliveredAt || s.status === "DELIVERED").length;
-  if (type === "LOST" && order.shipments.length > 0 && delivered === order.shipments.length) flags.push("MARKED_DELIVERED");
-  if (type === "STOLEN" && delivered === 0) flags.push("NOT_MARKED_DELIVERED");
-  if (!order.shipments.some((s) => s.tracking.some((t) => t.number))) flags.push("NO_TRACKING");
-  if (otherClaimsByEmail > 0) flags.push("PRIOR_CLAIMS");
+  const pkgs = claimedShipments(r.order, r.lineItemIds);
+  const delivered = pkgs.filter((s) => s.deliveredAt || stageOf(s.status) === "DELIVERED").length;
+  if (!r.isProtected) flags.push("NO_PROTECTION");
+  if (r.type === "LOST" && pkgs.length > 0 && delivered === pkgs.length) flags.push("MARKED_DELIVERED");
+  if (r.type === "STOLEN" && delivered === 0) flags.push("NOT_MARKED_DELIVERED");
+  if (!pkgs.some((s) => s.tracking.some((t) => t.number))) flags.push("NO_TRACKING");
+  if (r.otherClaimsByEmail + 1 >= r.settings.repeatThreshold && r.otherClaimsByEmail > 0) flags.push("PRIOR_CLAIMS");
+  if (r.otherClaimsByAddress + 1 >= r.settings.repeatThreshold && r.otherClaimsByAddress > 0) flags.push("REPEAT_ADDRESS");
+  if (r.duplicateTracking) flags.push("DUPLICATE_TRACKING");
+  if (r.settings.highValue > 0 && r.amount >= r.settings.highValue) flags.push("HIGH_VALUE");
+
+  // What the carrier says about the packages still on their way.
+  const carrier = new Set<string>();
+  for (const s of pkgs) {
+    const stage = stageOf(s.status, null, s.deliveredAt);
+    if (!isOpenStage(stage)) continue;
+    const f = shipmentFlags(
+      {
+        stage,
+        shippedAt: s.shippedAt,
+        deliveredAt: s.deliveredAt,
+        estimatedDeliveryAt: s.estimatedDeliveryAt ?? null,
+        lastEventAt: s.lastEventAt ?? null,
+        tracking: s.tracking,
+      },
+      r.tracking,
+      r.now,
+    );
+    if (f.includes("CARRIER_EXCEPTION")) carrier.add("CARRIER_EXCEPTION");
+    if (f.includes("LATE")) carrier.add("CARRIER_LATE");
+    if (f.includes("STALLED") || f.includes("NOT_SCANNED")) carrier.add("CARRIER_STALLED");
+    if (f.includes("POSSIBLY_LOST")) carrier.add("CARRIER_POSSIBLY_LOST");
+  }
+  // Lost, but the carrier still shows normal movement: maybe just slow.
+  const moving = pkgs.some((s) => {
+    const stage = stageOf(s.status, null, s.deliveredAt);
+    return stage === "IN_TRANSIT" || stage === "OUT_FOR_DELIVERY";
+  });
+  if (r.type === "LOST" && moving && carrier.size === 0) flags.push("EARLY_LOST");
+  flags.push(...carrier);
   return flags;
+}
+
+/** Tracking numbers on the claimed packages, normalised for matching across orders. */
+export const claimTrackingNumbers = (order: ClaimOrder, lineItemIds: string[]) =>
+  trackingNumbersOf(claimedShipments(order, lineItemIds).flatMap((s) => s.tracking));
+
+/**
+ * The merchant's value limits. Claimed amounts are what customers asked
+ * for in claims that weren't rejected. null = within the limits.
+ */
+export function limitProblem(
+  amount: number,
+  claimedOnOrder: number,
+  claimedByCustomer: number,
+  settings: ClaimSettings,
+): string | null {
+  if (settings.maxValuePerOrder > 0 && claimedOnOrder + amount > settings.maxValuePerOrder + 0.005) {
+    return "This claim is more than can be claimed online for one order. Please contact the store.";
+  }
+  if (settings.maxValuePerCustomer > 0 && claimedByCustomer + amount > settings.maxValuePerCustomer + 0.005) {
+    return "This claim is more than can be claimed online. Please contact the store.";
+  }
+  return null;
 }
 
 export interface ClaimItem {

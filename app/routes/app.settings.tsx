@@ -32,6 +32,7 @@ import { ensureShop } from "../lib/shop.server";
 import { uploadsConfigured } from "../lib/blob.server";
 import { emailConfigured } from "../lib/email.server";
 import type { ClaimSettings } from "../lib/claims";
+import type { TrackingSettings } from "../lib/tracking";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -108,6 +109,19 @@ export default function SettingsPage() {
   }, [fetcher.data, shopify]);
 
   const setClaims = (patch: Partial<ClaimSettings>) => setS({ ...s, claims: { ...s.claims, ...patch } });
+  const setTracking = (patch: Partial<TrackingSettings>) => setS({ ...s, tracking: { ...s.tracking, ...patch } });
+  const days = (label: string, value: number, max: number, onChange: (n: number) => void, details?: string) => (
+    <s-number-field
+      label={label}
+      details={details}
+      value={String(value)}
+      min={0}
+      max={max}
+      step={1}
+      suffix="days"
+      onInput={(e) => onChange(Number(e.currentTarget.value) || 0)}
+    />
+  );
   const setRules = (patch: Partial<PricingRules>) => setS({ ...s, rules: { ...s.rules, ...patch } });
   const setTier = (i: number, patch: Partial<Tier>) =>
     setRules({ tiers: s.rules.tiers.map((t, j) => (j === i ? { ...t, ...patch } : t)) });
@@ -479,13 +493,21 @@ export default function SettingsPage() {
               )}
               <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
                 <s-number-field
-                  label="Claim window (days after shipping)"
+                  label="Claim window (days)"
                   value={String(s.claims.windowDays)}
                   min={1}
                   max={365}
                   step={1}
                   onInput={(e) => setClaims({ windowDays: Number(e.currentTarget.value) || 0 })}
                 />
+                <s-select
+                  label="Window starts"
+                  value={s.claims.windowFrom}
+                  onChange={(e) => setClaims({ windowFrom: e.currentTarget.value as ClaimSettings["windowFrom"] })}
+                >
+                  <s-option value="SHIPPED">When the order ships</s-option>
+                  <s-option value="DELIVERED">When it&apos;s delivered (or ships, if never delivered)</s-option>
+                </s-select>
                 <s-number-field
                   label="Report lost after (days in transit)"
                   details="0 = any time. Stops “lost” claims for packages that are just slow."
@@ -515,6 +537,38 @@ export default function SettingsPage() {
                 checked={s.claims.photosForDamage}
                 onChange={(e) => setClaims({ photosForDamage: e.currentTarget.checked })}
               />
+              <s-checkbox
+                label="Require a supporting document for lost and stolen claims"
+                details="For example a police report or the carrier's reply. Customers can upload photos or PDFs."
+                checked={s.claims.evidenceForLostStolen}
+                onChange={(e) => setClaims({ evidenceForLostStolen: e.currentTarget.checked })}
+              />
+              <s-heading>Limits and review flags</s-heading>
+              <s-text color="subdued">
+                Limits stop a claim being filed online (the customer is asked to contact you; you can still create
+                it under Claims). Flags never block anything — they mark claims to look at more closely.
+              </s-text>
+              <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
+                {field("Most that can be claimed per order", s.claims.maxValuePerOrder, (n) => setClaims({ maxValuePerOrder: Number.isFinite(n) ? n : 0 }), {
+                  details: "All claims on the order together. 0 = no limit.",
+                })}
+                {field("Most one customer can claim in 12 months", s.claims.maxValuePerCustomer, (n) => setClaims({ maxValuePerCustomer: Number.isFinite(n) ? n : 0 }), {
+                  details: "By email. 0 = no limit.",
+                })}
+                {field("Flag claims worth at least", s.claims.highValue, (n) => setClaims({ highValue: Number.isFinite(n) ? n : 0 }), {
+                  details: "0 = off.",
+                })}
+                <s-number-field
+                  label="Flag repeat claims from"
+                  details="Claims in 12 months from the same customer or shipping address, this one included."
+                  value={String(s.claims.repeatThreshold)}
+                  min={2}
+                  max={20}
+                  step={1}
+                  suffix="claims"
+                  onInput={(e) => setClaims({ repeatThreshold: Number(e.currentTarget.value) || 2 })}
+                />
+              </s-grid>
               <s-email-field
                 label="Send new-claim emails to"
                 placeholder="Your store's email"
@@ -530,6 +584,21 @@ export default function SettingsPage() {
               />
             </s-stack>
           )}
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Tracking" id="tracking">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Packages of protected orders are followed on the <s-link href="/app/shipments">Shipments</s-link> page.
+            These rules decide when one is flagged for you to check. Set any of them to 0 to turn it off.
+          </s-paragraph>
+          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
+            {days("Not picked up after", s.tracking.noScanDays, 60, (n) => setTracking({ noScanDays: n }), "Fulfilled, but no carrier scan yet.")}
+            {days("Stalled after", s.tracking.staleDays, 60, (n) => setTracking({ staleDays: n }), "In transit with no carrier update.")}
+            {days("Late after", s.tracking.lateDays, 60, (n) => setTracking({ lateDays: n }), "Days past the carrier's estimated delivery.")}
+            {days("Possibly lost after", s.tracking.lostDays, 180, (n) => setTracking({ lostDays: n }), "Days since shipping without delivery.")}
+          </s-grid>
         </s-stack>
       </s-section>
 

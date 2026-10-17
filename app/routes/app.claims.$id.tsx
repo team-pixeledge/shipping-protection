@@ -29,7 +29,12 @@ import {
   RESOLUTION_KIND_LABELS,
   RESOLUTION_KINDS,
   type ResolutionKind,
+  isSupportFlag,
+  PRIORITY_LABELS,
+  reviewPriority,
 } from "../lib/claims";
+import { refreshOrderShipments } from "../lib/tracking.server";
+import { SHIPMENT_FLAG_LABELS, STAGE_LABELS, STAGE_TONE, type ShipmentFlag, type Stage, type TrackingNumber } from "../lib/tracking";
 import { changeClaimStatus, ClaimConflict, messageCustomer } from "../lib/claims.server";
 import { clearStuck, refundPreview, resolveClaim, ResolutionError, type RefundPreview } from "../lib/resolutions.server";
 
@@ -58,6 +63,10 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   }
   const running = claim.resolutions.find((r) => r.id === claim.resolutionLock && r.status === "PROCESSING");
   const appUrl = (process.env.SHOPIFY_APP_URL || "").replace(/\/$/, "");
+  const packages = await prisma.shipment.findMany({
+    where: { shop: session.shop, orderId: claim.orderId },
+    orderBy: { shippedAt: "asc" },
+  });
   const otherClaims = await prisma.claim.findMany({
     where: { shop: session.shop, email: claim.email, id: { not: claim.id } },
     orderBy: { createdAt: "desc" },
@@ -80,11 +89,26 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       currency: claim.currency,
       protected: claim.protected,
       flags: claim.flags,
+      dismissedFlags: claim.dismissedFlags,
+      source: claim.source,
       shipments: claim.shipments as unknown as Shipment[],
       createdAt: claim.createdAt.toISOString(),
       resolvedAt: claim.resolvedAt?.toISOString() ?? null,
     },
     shopCurrency: shopRow.currency,
+    packages: packages.map((p) => ({
+      id: p.fulfillmentId,
+      stage: p.stage as Stage,
+      tracking: p.tracking as unknown as TrackingNumber[],
+      shippedAt: p.shippedAt.toISOString(),
+      deliveredAt: p.deliveredAt?.toISOString() ?? null,
+      expected: p.estimatedDeliveryAt?.toISOString() ?? null,
+      lastEventAt: p.lastEventAt?.toISOString() ?? null,
+      lastEventStatus: p.lastEventStatus,
+      checkedAt: p.checkedAt.toISOString(),
+      flags: p.flags as ShipmentFlag[],
+      claimed: p.lineItemIds.some((id) => (claim.items as unknown as ClaimItem[]).some((i) => i.lineItemId === id)),
+    })),
     refund,
     refundError,
     running: running ? { stuck: Date.now() - running.createdAt.getTime() > 5 * 60_000 } : null,
@@ -151,6 +175,36 @@ export const action = async ({ request, params }: ActionFunctionArgs): Promise<A
       await resolveClaim(admin, session.shop, claim.id, input);
       return { ok: true, intent: "resolve" };
     }
+    if (body.intent === "dismissFlag" || body.intent === "restoreFlag") {
+      const flag = text(body.flag, 40);
+      if (!claim.flags.includes(flag)) return { ok: false, error: "Unknown flag." };
+      const note = text(body.note, 1000);
+      if (body.intent === "dismissFlag" && !note) return { ok: false, error: "Say why this flag doesn't apply." };
+      const dismissed =
+        body.intent === "dismissFlag"
+          ? [...new Set([...claim.dismissedFlags, flag])]
+          : claim.dismissedFlags.filter((f) => f !== flag);
+      await prisma.$transaction([
+        prisma.claim.update({ where: { id: claim.id }, data: { dismissedFlags: dismissed } }),
+        prisma.claimEvent.create({
+          data: {
+            claimId: claim.id,
+            actor: "MERCHANT",
+            kind: "NOTE",
+            internal: true,
+            message:
+              body.intent === "dismissFlag"
+                ? `Dismissed the flag “${FLAG_LABELS[flag] ?? flag}”: ${note}`
+                : `Restored the flag “${FLAG_LABELS[flag] ?? flag}”.`,
+          },
+        }),
+      ]);
+      return { ok: true, intent: body.intent };
+    }
+    if (body.intent === "refreshTracking") {
+      await refreshOrderShipments(admin, session.shop, claim.orderId);
+      return { ok: true, intent: "refreshTracking" };
+    }
     if (body.intent === "clearStuck") {
       await clearStuck(session.shop, claim.id);
       return { ok: true, intent: "clearStuck" };
@@ -205,7 +259,7 @@ const ACTION_LABELS: Record<ClaimStatus, string> = {
 };
 
 export default function ClaimPage() {
-  const { claim, files, events, otherClaims, refund, refundError, running, resolutions, shopCurrency } =
+  const { claim, files, events, otherClaims, refund, refundError, running, resolutions, shopCurrency, packages } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionResult>();
   const shopify = useAppBridge();
@@ -238,6 +292,9 @@ export default function ClaimPage() {
       message: "Message sent",
       note: "Note added",
       resolve: "Resolution carried out",
+      dismissFlag: "Flag dismissed",
+      restoreFlag: "Flag restored",
+      refreshTracking: "Tracking refreshed",
       clearStuck: "Cleared — you can try again",
     };
     shopify.toast.show(toasts[d.intent] ?? "Saved");
@@ -263,14 +320,7 @@ export default function ClaimPage() {
         </s-banner>
       )}
       {claim.flags.length > 0 && (
-        <s-banner tone="warning" heading="Check before deciding">
-          <s-unordered-list>
-            {claim.flags.map((f) => (
-              <s-list-item key={f}>{FLAG_LABELS[f] ?? f}</s-list-item>
-            ))}
-          </s-unordered-list>
-          These are hints from the order and tracking data, not proof either way.
-        </s-banner>
+        <FlagsPanel flags={claim.flags} dismissed={claim.dismissedFlags} busy={busy} submit={submit} />
       )}
 
       <s-section heading="Decision">
@@ -448,6 +498,65 @@ export default function ClaimPage() {
         <s-text color="subdued">Links stop working after 15 minutes. Reload the page for fresh ones.</s-text>
       </s-section>
 
+      <s-section heading="Packages now">
+        <s-stack direction="block" gap="base">
+          {packages.length === 0 ? (
+            <s-paragraph>No tracking stored for this order yet.</s-paragraph>
+          ) : (
+            <s-table>
+              <s-table-header-row>
+                <s-table-header>Status</s-table-header>
+                <s-table-header>Tracking</s-table-header>
+                <s-table-header>Shipped</s-table-header>
+                <s-table-header>Expected / delivered</s-table-header>
+                <s-table-header>Last carrier update</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {packages.map((p) => (
+                  <s-table-row key={p.id}>
+                    <s-table-cell>
+                      <s-stack direction="block" gap="small-100">
+                        <s-stack direction="inline" gap="small-100">
+                          <s-badge tone={STAGE_TONE[p.stage]}>{STAGE_LABELS[p.stage]}</s-badge>
+                          {p.claimed && packages.length > 1 && <s-badge>Has claimed items</s-badge>}
+                        </s-stack>
+                        {p.flags.map((f) => (
+                          <s-text key={f} color="subdued">
+                            ⚠ {SHIPMENT_FLAG_LABELS[f] ?? f}
+                          </s-text>
+                        ))}
+                      </s-stack>
+                    </s-table-cell>
+                    <s-table-cell>
+                      <TrackingLinks tracking={p.tracking} />
+                    </s-table-cell>
+                    <s-table-cell>{new Date(p.shippedAt).toLocaleDateString()}</s-table-cell>
+                    <s-table-cell>
+                      {p.deliveredAt
+                        ? `Delivered ${new Date(p.deliveredAt).toLocaleDateString()}`
+                        : p.expected
+                          ? `Expected ${new Date(p.expected).toLocaleDateString()}`
+                          : "—"}
+                    </s-table-cell>
+                    <s-table-cell>
+                      {p.lastEventAt
+                        ? `${new Date(p.lastEventAt).toLocaleDateString()}${p.lastEventStatus ? ` · ${p.lastEventStatus.replace(/_/g, " ").toLowerCase()}` : ""}`
+                        : "None from the carrier"}
+                    </s-table-cell>
+                  </s-table-row>
+                ))}
+              </s-table-body>
+            </s-table>
+          )}
+          <s-stack direction="inline" gap="small-200" alignItems="center">
+            <s-button {...(busy ? { loading: true } : {})} onClick={() => submit({ intent: "refreshTracking" })}>
+              Refresh tracking
+            </s-button>
+            <s-text color="subdued">A delivery scan alone doesn&apos;t prove a package arrived — or that it didn&apos;t.</s-text>
+          </s-stack>
+        </s-stack>
+      </s-section>
+
       <s-section heading="Shipping when the claim was filed">
         {claim.shipments.length === 0 ? (
           <s-paragraph>No shipments.</s-paragraph>
@@ -466,17 +575,7 @@ export default function ClaimPage() {
                   <s-table-cell>{new Date(s.shippedAt).toLocaleDateString()}</s-table-cell>
                   <s-table-cell>{s.deliveredAt ? new Date(s.deliveredAt).toLocaleDateString() : "—"}</s-table-cell>
                   <s-table-cell>
-                    {s.tracking.length === 0
-                      ? "—"
-                      : s.tracking.map((t, j) =>
-                          t.url ? (
-                            <s-link key={j} href={t.url} target="_blank">
-                              {[t.company, t.number].filter(Boolean).join(" ")}
-                            </s-link>
-                          ) : (
-                            <s-text key={j}>{[t.company, t.number].filter(Boolean).join(" ")}</s-text>
-                          ),
-                        )}
+                    <TrackingLinks tracking={s.tracking} />
                   </s-table-cell>
                 </s-table-row>
               ))}
@@ -768,7 +867,7 @@ function eventTitle(e: { actor: string; kind: string; status: string | null }) {
   const who = e.actor === "CUSTOMER" ? "Customer" : e.actor === "MERCHANT" ? "Staff" : "System";
   switch (e.kind) {
     case "SUBMITTED":
-      return "Customer filed the claim";
+      return e.actor === "MERCHANT" ? "Staff created the claim" : "Customer filed the claim";
     case "STATUS":
       return `${who}: ${STATUS_LABELS[e.status as ClaimStatus] ?? e.status}`;
     case "MESSAGE":
@@ -784,6 +883,101 @@ function eventTitle(e: { actor: string; kind: string; status: string | null }) {
     default:
       return e.kind;
   }
+}
+
+function TrackingLinks({ tracking }: { tracking: TrackingNumber[] }) {
+  if (!tracking.length) return <>—</>;
+  return (
+    <s-stack direction="block" gap="small-100">
+      {tracking.map((t, j) =>
+        t.url ? (
+          <s-link key={j} href={t.url} target="_blank">
+            {[t.company, t.number].filter(Boolean).join(" ")}
+          </s-link>
+        ) : (
+          <s-text key={j}>{[t.company, t.number].filter(Boolean).join(" ")}</s-text>
+        ),
+      )}
+    </s-stack>
+  );
+}
+
+/** Review flags: warnings (with dismiss for false positives) and carrier data that supports the claim. */
+function FlagsPanel({ flags, dismissed, busy, submit }: { flags: string[]; dismissed: string[]; busy: boolean; submit: Submit }) {
+  const [dismissing, setDismissing] = useState<string | null>(null);
+  const [why, setWhy] = useState("");
+  const warnings = flags.filter((f) => !isSupportFlag(f));
+  const support = flags.filter(isSupportFlag);
+  const priority = reviewPriority(flags, dismissed);
+  return (
+    <>
+      {warnings.length > 0 && (
+        <s-banner
+          tone={priority === "HIGH" ? "warning" : "info"}
+          heading={`Review priority: ${PRIORITY_LABELS[priority]}`}
+        >
+          <s-stack direction="block" gap="small-200">
+            {warnings.map((f) => {
+              const off = dismissed.includes(f);
+              return (
+                <s-stack key={f} direction="block" gap="small-100">
+                  <s-stack direction="inline" gap="small-200" alignItems="center">
+                    <s-text>{off ? <s>{FLAG_LABELS[f] ?? f}</s> : (FLAG_LABELS[f] ?? f)}</s-text>
+                    {off ? (
+                      <s-button variant="tertiary" onClick={() => submit({ intent: "restoreFlag", flag: f })}>
+                        Restore
+                      </s-button>
+                    ) : (
+                      dismissing !== f && (
+                        <s-button variant="tertiary" onClick={() => (setDismissing(f), setWhy(""))}>
+                          Not relevant
+                        </s-button>
+                      )
+                    )}
+                  </s-stack>
+                  {dismissing === f && (
+                    <s-stack direction="inline" gap="small-200" alignItems="end">
+                      <s-text-field
+                        label="Why doesn't it apply? (internal)"
+                        value={why}
+                        onInput={(e) => setWhy(e.currentTarget.value)}
+                      />
+                      <s-button
+                        disabled={!why.trim()}
+                        {...(busy ? { loading: true } : {})}
+                        onClick={() => {
+                          submit({ intent: "dismissFlag", flag: f, note: why });
+                          setDismissing(null);
+                        }}
+                      >
+                        Dismiss
+                      </s-button>
+                      <s-button variant="tertiary" onClick={() => setDismissing(null)}>
+                        Cancel
+                      </s-button>
+                    </s-stack>
+                  )}
+                </s-stack>
+              );
+            })}
+            <s-text color="subdued">
+              Hints from the order, tracking and your other claims — not proof either way. Never treat a customer as
+              dishonest because of a flag alone.
+            </s-text>
+          </s-stack>
+        </s-banner>
+      )}
+      {support.length > 0 && (
+        <s-banner tone="success" heading="Carrier data that supports this claim">
+          <s-unordered-list>
+            {support.map((f) => (
+              <s-list-item key={f}>{FLAG_LABELS[f] ?? f}</s-list-item>
+            ))}
+          </s-unordered-list>
+        </s-banner>
+      )}
+    </>
+  );
 }
 
 function Field({ label, value }: { label: string; value: string }) {

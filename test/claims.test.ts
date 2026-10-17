@@ -4,7 +4,12 @@ import {
   canTransition,
   claimableLines,
   claimFlags,
+  claimTrackingNumbers,
   DEFAULT_CLAIM_SETTINGS,
+  limitProblem,
+  reviewPriority,
+  windowStart,
+  type RiskInput,
   normalizeOrderName,
   orderEligibility,
   parseClaimSettings,
@@ -17,6 +22,7 @@ import {
 } from "../app/lib/claims";
 import { signToken, tokenShop, verifyToken } from "../app/lib/claim-token.server";
 import { DEFAULT_COVERAGE } from "../shared/pricing";
+import { DEFAULT_TRACKING_SETTINGS } from "../app/lib/tracking";
 import { toClaimOrder } from "../app/lib/claims.server";
 import { claimFormPage, esc, lookupPage, statusPage } from "../app/lib/portal-pages";
 
@@ -136,13 +142,106 @@ describe("typeProblem", () => {
 });
 
 describe("claimFlags", () => {
+  const risk = (patch: Partial<RiskInput> = {}): RiskInput => ({
+    order: order(),
+    type: "LOST",
+    isProtected: true,
+    lineItemIds: ["gid://shopify/LineItem/1"],
+    amount: 49,
+    settings,
+    tracking: DEFAULT_TRACKING_SETTINGS,
+    otherClaimsByEmail: 0,
+    otherClaimsByAddress: 0,
+    duplicateTracking: false,
+    now,
+    ...patch,
+  });
+  const delivered = order({ shipments: [{ ...order().shipments[0], status: "DELIVERED", deliveredAt: daysAgo(1) }] });
+
   test("hints only where the data disagrees with the story", () => {
-    expect(claimFlags(order(), "LOST", true, 0)).toEqual([]);
-    const delivered = order({ shipments: [{ ...order().shipments[0], status: "DELIVERED", deliveredAt: daysAgo(1) }] });
-    expect(claimFlags(delivered, "LOST", true, 0)).toEqual(["MARKED_DELIVERED"]);
-    expect(claimFlags(order(), "STOLEN", true, 0)).toEqual(["NOT_MARKED_DELIVERED"]);
+    // In transit 8 days with no carrier events and no ETA: nothing to say yet, but "lost" is early.
+    expect(claimFlags(risk())).toEqual(["EARLY_LOST"]);
+    expect(claimFlags(risk({ order: delivered }))).toEqual(["MARKED_DELIVERED"]);
+    expect(claimFlags(risk({ type: "STOLEN" }))).toEqual(["NOT_MARKED_DELIVERED"]);
     const untracked = order({ shipments: [{ ...order().shipments[0], tracking: [] }] });
-    expect(claimFlags(untracked, "DAMAGED", false, 2)).toEqual(["NO_PROTECTION", "NO_TRACKING", "PRIOR_CLAIMS"]);
+    expect(claimFlags(risk({ order: untracked, type: "DAMAGED", isProtected: false, otherClaimsByEmail: 2 }))).toEqual([
+      "NO_PROTECTION",
+      "NO_TRACKING",
+      "PRIOR_CLAIMS",
+    ]);
+  });
+
+  test("repeat, duplicate and high-value signals follow the settings", () => {
+    const strict = { ...settings, repeatThreshold: 3, highValue: 40 };
+    expect(claimFlags(risk({ type: "DAMAGED", settings: strict, otherClaimsByEmail: 1, otherClaimsByAddress: 2, duplicateTracking: true }))).toEqual([
+      "REPEAT_ADDRESS",
+      "DUPLICATE_TRACKING",
+      "HIGH_VALUE",
+    ]);
+  });
+
+  test("carrier data that supports a lost claim replaces the early-lost hint", () => {
+    const late = order({
+      shipments: [{ ...order().shipments[0], estimatedDeliveryAt: daysAgo(5), lastEventAt: daysAgo(7) }],
+    });
+    expect(claimFlags(risk({ order: late }))).toEqual(["CARRIER_LATE", "CARRIER_STALLED"]);
+    const old = order({ shipments: [{ ...order().shipments[0], shippedAt: daysAgo(25) }] });
+    expect(claimFlags(risk({ order: old }))).toContain("CARRIER_POSSIBLY_LOST");
+  });
+
+  test("only the packages holding claimed items count", () => {
+    const split = order({
+      shipments: [
+        { ...order().shipments[0], id: "1", status: "DELIVERED", deliveredAt: daysAgo(2), lineItemIds: ["gid://shopify/LineItem/6"] },
+        { ...order().shipments[0], id: "2", lineItemIds: ["gid://shopify/LineItem/1"], tracking: [{ number: "XYZ12345", company: null, url: null }] },
+      ],
+    });
+    // The vase's package isn't delivered, so a lost claim on it isn't contradicted.
+    expect(claimFlags(risk({ order: split }))).not.toContain("MARKED_DELIVERED");
+    expect(claimFlags(risk({ order: split, lineItemIds: ["gid://shopify/LineItem/6"] }))).toContain("MARKED_DELIVERED");
+    expect(claimTrackingNumbers(split, ["gid://shopify/LineItem/1"])).toEqual(["XYZ12345"]);
+  });
+
+  test("review priority ignores dismissed and supporting flags", () => {
+    expect(reviewPriority([])).toBe("LOW");
+    expect(reviewPriority(["CARRIER_LATE"])).toBe("LOW");
+    expect(reviewPriority(["NO_TRACKING"])).toBe("MEDIUM");
+    expect(reviewPriority(["NO_TRACKING", "HIGH_VALUE"])).toBe("HIGH");
+    expect(reviewPriority(["DUPLICATE_TRACKING"])).toBe("HIGH");
+    expect(reviewPriority(["DUPLICATE_TRACKING"], ["DUPLICATE_TRACKING"])).toBe("LOW");
+  });
+});
+
+describe("claim limits and window", () => {
+  test("value limits per order and per customer; 0 = none", () => {
+    expect(limitProblem(500, 0, 0, settings)).toBeNull();
+    const limited = { ...settings, maxValuePerOrder: 100, maxValuePerCustomer: 300 };
+    expect(limitProblem(100, 0, 0, limited)).toBeNull();
+    expect(limitProblem(60, 50, 0, limited)).toMatch(/one order/);
+    expect(limitProblem(60, 0, 250, limited)).toMatch(/more than can be claimed/);
+  });
+
+  test("window from delivery", () => {
+    const fromDelivery = { ...settings, windowFrom: "DELIVERED" as const, windowDays: 10 };
+    const shippedLong = order({ shipments: [{ ...order().shipments[0], shippedAt: daysAgo(40), deliveredAt: daysAgo(5) }] });
+    const base = { settings: fromDelivery, isProtected: true, prior: [], now };
+    expect(orderEligibility(shippedLong, base).ok).toBe(true);
+    expect(orderEligibility(shippedLong, { ...base, settings: { ...fromDelivery, windowFrom: "SHIPPED" } }).ok).toBe(false);
+    const late = order({ shipments: [{ ...order().shipments[0], shippedAt: daysAgo(40), deliveredAt: daysAgo(20) }] });
+    expect(orderEligibility(late, base)).toMatchObject({ ok: false, reason: expect.stringMatching(/10 days of delivery/) });
+    // Never delivered: open while it could still be lost.
+    const lost = order({ shipments: [{ ...order().shipments[0], shippedAt: daysAgo(60) }] });
+    expect(orderEligibility(lost, base).ok).toBe(true);
+    expect(windowStart(order({ shipments: [{ ...order().shipments[0], shippedAt: daysAgo(200) }] }), fromDelivery, now)).toBe(daysAgo(200));
+  });
+
+  test("claim settings parse the new fields", () => {
+    expect(parseClaimSettings({ windowFrom: "DELIVERED", maxValuePerOrder: "99.999", repeatThreshold: 1, highValue: -5 })).toMatchObject({
+      windowFrom: "DELIVERED",
+      maxValuePerOrder: 100,
+      repeatThreshold: 2,
+      highValue: 0,
+    });
   });
 });
 
@@ -212,6 +311,7 @@ describe("toClaimOrder", () => {
       createdAt: daysAgo(3),
       cancelledAt: null,
       currencyCode: "EUR",
+      customerLocale: "fr-CA",
       customer: { id: "gid://shopify/Customer/77" },
       lineItems: {
         nodes: [
@@ -229,13 +329,44 @@ describe("toClaimOrder", () => {
         ],
       },
       fulfillments: [
-        { createdAt: daysAgo(2), displayStatus: "IN_TRANSIT", deliveredAt: null, status: "SUCCESS", trackingInfo: [] },
-        { createdAt: daysAgo(2), displayStatus: null, deliveredAt: null, status: "CANCELLED", trackingInfo: [] },
+        {
+          id: "gid://shopify/Fulfillment/71",
+          createdAt: daysAgo(2),
+          displayStatus: "IN_TRANSIT",
+          deliveredAt: null,
+          inTransitAt: daysAgo(1),
+          estimatedDeliveryAt: daysAgo(-2),
+          status: "SUCCESS",
+          trackingInfo: [{ number: "1Z 999", company: "UPS", url: null }],
+          events: { nodes: [{ status: "IN_TRANSIT", happenedAt: daysAgo(1) }] },
+          fulfillmentLineItems: { nodes: [{ lineItem: { id: "gid://shopify/LineItem/1" } }] },
+        },
+        {
+          id: "gid://shopify/Fulfillment/72",
+          createdAt: daysAgo(2),
+          displayStatus: null,
+          deliveredAt: null,
+          inTransitAt: null,
+          estimatedDeliveryAt: null,
+          status: "CANCELLED",
+          trackingInfo: [],
+        },
       ],
     });
-    expect(o).toMatchObject({ id: "5001", customerId: "77", cancelled: false });
+    expect(o).toMatchObject({ id: "5001", customerId: "77", cancelled: false, locale: "fr-CA" });
     expect(o.lines[0].unitAmount).toBe(19.9);
-    expect(o.shipments).toHaveLength(1);
+    expect(o.shipments).toEqual([
+      {
+        id: "71",
+        status: "IN_TRANSIT",
+        shippedAt: daysAgo(2),
+        deliveredAt: null,
+        estimatedDeliveryAt: daysAgo(-2),
+        lastEventAt: daysAgo(1),
+        tracking: [{ number: "1Z 999", company: "UPS", url: null }],
+        lineItemIds: ["gid://shopify/LineItem/1"],
+      },
+    ]);
   });
 });
 

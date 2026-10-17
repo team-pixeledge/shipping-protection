@@ -7,13 +7,14 @@ import { authenticate } from "../shopify.server";
 import { EMBED_HANDLE, embedStatus } from "../lib/embed.server";
 import { parseSettings } from "../lib/settings";
 import { ensureShop } from "../lib/shop.server";
+import { attentionCount } from "../lib/tracking.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
   const days = parsePeriod(new URL(request.url).searchParams.get("days"));
 
-  const [embed, results, recent] = await Promise.all([
+  const [embed, results, recent, attention] = await Promise.all([
     embedStatus(admin),
     programResults(shop.shop, days),
     prisma.orderRecord.findMany({
@@ -21,6 +22,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { orderedAt: "desc" },
       take: 10,
     }),
+    attentionCount(shop.shop),
   ]);
 
   const apiKey = process.env.SHOPIFY_API_KEY || "";
@@ -37,6 +39,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     blockUrl: `shopify://admin/themes/current/editor?template=cart&addAppBlockId=${apiKey}/cart-protection&target=newAppsSection`,
     days,
     results,
+    attention,
     claimsEnabled: configured && parseSettings(shop.settings).claims.enabled,
     recent: recent.map((r) => ({
       id: r.orderId,
@@ -155,6 +158,13 @@ export default function Home() {
           </s-text>
         </s-stack>
       </s-section>
+
+      {d.attention > 0 && (
+        <s-banner tone="warning" heading={`${d.attention} protected ${d.attention === 1 ? "package needs" : "packages need"} a look`}>
+          Late, stalled, not picked up or missing tracking.{" "}
+          <s-link href="/app/shipments">See shipments</s-link>
+        </s-banner>
+      )}
 
       <s-section heading="Claims">
         {d.claimsEnabled || r.claims.received > 0 ? (
