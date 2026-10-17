@@ -1,15 +1,20 @@
 // Fixed-window counters in Postgres (serverless instances share no memory).
 // One atomic statement per hit: a window that has run out starts over.
+// All times are the database's own clock (now()): mixing it with the app
+// server's clock made windows reset early when the two disagreed.
 import prisma from "../db.server";
 
 /** Counts a hit; false once `limit` hits were made in the current window. */
 export async function allow(key: string, limit: number, windowMs: number): Promise<boolean> {
-  const reset = new Date(Date.now() + windowMs);
+  const ms = Math.round(windowMs);
   const rows = await prisma.$queryRaw<{ count: number }[]>`
-    INSERT INTO "RateLimit" ("key", "count", "resetAt") VALUES (${key}, 1, ${reset})
+    INSERT INTO "RateLimit" ("key", "count", "resetAt")
+    VALUES (${key}, 1, (now() AT TIME ZONE 'UTC') + ${ms} * interval '1 millisecond')
     ON CONFLICT ("key") DO UPDATE SET
-      "count" = CASE WHEN "RateLimit"."resetAt" < now() THEN 1 ELSE "RateLimit"."count" + 1 END,
-      "resetAt" = CASE WHEN "RateLimit"."resetAt" < now() THEN ${reset} ELSE "RateLimit"."resetAt" END
+      "count" = CASE WHEN "RateLimit"."resetAt" < (now() AT TIME ZONE 'UTC') THEN 1 ELSE "RateLimit"."count" + 1 END,
+      "resetAt" = CASE WHEN "RateLimit"."resetAt" < (now() AT TIME ZONE 'UTC')
+        THEN (now() AT TIME ZONE 'UTC') + ${ms} * interval '1 millisecond'
+        ELSE "RateLimit"."resetAt" END
     RETURNING "count"`;
   return (rows[0]?.count ?? 1) <= limit;
 }

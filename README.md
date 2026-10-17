@@ -267,7 +267,7 @@ locally (`react-router-serve`, Prisma), point `DATABASE_URL` and
 ## Checks
 
 ```bash
-npm test              # 120 tests (+8 database tests, skipped without TEST_DATABASE_URL)
+npm test              # 120 tests (+10 database tests, skipped without TEST_DATABASE_URL)
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:55451/shipping_protection npx vitest run test/*.db.test.ts
 npm run typecheck
 npm run lint

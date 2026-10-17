@@ -322,7 +322,7 @@ vars and Neon branch — the user wants one Vercel project per app.
 
 ## Verified 2026-10-17 (local only)
 
-- 120 vitest tests + 8 DB tests (resolutions, billing incl. three concurrent
+- 120 vitest tests + 10 DB tests (resolutions, rate limits, billing incl. three concurrent
   orders for the last free slot) on real Postgres (docker `safeship-db`).
 - `shopify app build`: all five extensions build; the transform wasm run on a
   sample cart returns the exact fee in presentment currency.
