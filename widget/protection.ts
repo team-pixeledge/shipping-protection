@@ -313,7 +313,7 @@ class Widget {
       // or nothing matching the merchant's rules) protection isn't offered.
       const covered = await this.coveredItems(others);
       const subtotal = covered.reduce((s, i) => s + i.final_line_price, 0) / 100 / this.rate;
-      const q = covered.length ? quote(this.cfg, subtotal) : null;
+      const q = covered.length ? quote(this.cfg, subtotal, this.env.country) : null;
       const want =
         q !== null &&
         (choice === "accepted" ||
@@ -429,6 +429,21 @@ class Widget {
     return [...blockSlots, ...auto];
   }
 
+  /** The price shown before protection is added (afterwards, the cart line's own price). */
+  private offerPrice(q: Quote) {
+    // A market's fixed price is already in the shopper's currency.
+    if (q.fixed) {
+      try {
+        return new Intl.NumberFormat(this.env.locale, { style: "currency", currency: q.fixed.currency }).format(q.fixed.amount);
+      } catch {
+        return `${q.fixed.amount.toFixed(2)} ${q.fixed.currency}`;
+      }
+    }
+    // Exact pricing (Plus): the cart transform charges the fee itself.
+    const shop = this.cfg.exact ? q.fee : q.priceMinor / 10 ** this.cfg.decimals;
+    return this.money.format(shop * this.rate);
+  }
+
   private render(slot: HTMLElement, offered: boolean, line: CartItem | undefined) {
     if (!offered) {
       if (!slot.hidden) slot.hidden = true;
@@ -436,9 +451,7 @@ class Widget {
     }
     slot.hidden = false;
     const on = Boolean(line);
-    const price = line
-      ? this.money.format(line.final_price / 100)
-      : this.money.format(((this.quote!.priceMinor / 10 ** this.cfg.decimals) * this.rate));
+    const price = line ? this.money.format(line.final_price / 100) : this.offerPrice(this.quote!);
     const t = this.env.t;
     const title = this.cfg.copy.title || t.title;
     const description = this.cfg.copy.description || t.description;

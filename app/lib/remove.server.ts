@@ -1,7 +1,7 @@
 // "Remove from store": undoes everything setup created, for a clean
 // uninstall (after uninstall there's no token left to do it).
 import prisma from "../db.server";
-import { CONFIG_NAMESPACE, type AdminGraphql } from "./setup.server";
+import { CHECKOUT_NAMESPACE, CONFIG_NAMESPACE, type AdminGraphql } from "./setup.server";
 
 export async function removeFromStore(admin: AdminGraphql, shop: string) {
   const row = await prisma.shop.findUniqueOrThrow({ where: { shop } });
@@ -25,6 +25,15 @@ export async function removeFromStore(admin: AdminGraphql, shop: string) {
       { id: row.validationId },
     );
   }
+  if (row.cartTransformId) {
+    await run(
+      "Exact pricing",
+      `#graphql
+      mutation SpTransformDelete($id: ID!) { cartTransformDelete(id: $id) { userErrors { message } } }`,
+      { id: row.cartTransformId },
+    );
+  }
+  // Deleting the product also removes its market prices from price lists.
   if (row.productId) {
     await run(
       "Protection product",
@@ -34,23 +43,34 @@ export async function removeFromStore(admin: AdminGraphql, shop: string) {
     );
   }
   const inst = await admin.graphql(`#graphql
-    query SpInstallationId { currentAppInstallation { id } }`);
-  const instId = ((await inst.json()) as { data?: { currentAppInstallation: { id: string } } }).data
-    ?.currentAppInstallation.id;
-  if (instId) {
+    query SpInstallationId { currentAppInstallation { id } shop { id } }`);
+  const ids = ((await inst.json()) as { data?: { currentAppInstallation: { id: string }; shop: { id: string } } }).data;
+  if (ids) {
     await run(
       "Storefront config",
       `#graphql
       mutation SpConfigDelete($metafields: [MetafieldIdentifierInput!]!) {
         metafieldsDelete(metafields: $metafields) { userErrors { message } }
       }`,
-      { metafields: [{ ownerId: instId, namespace: CONFIG_NAMESPACE, key: "config" }] },
+      {
+        metafields: [
+          { ownerId: ids.currentAppInstallation.id, namespace: CONFIG_NAMESPACE, key: "config" },
+          { ownerId: ids.shop.id, namespace: CHECKOUT_NAMESPACE, key: "config" },
+        ],
+      },
     );
   }
 
   await prisma.shop.update({
     where: { shop },
-    data: { productId: null, productHandle: null, validationId: null, syncedVersion: 0, syncError: null },
+    data: {
+      productId: null,
+      productHandle: null,
+      validationId: null,
+      cartTransformId: null,
+      syncedVersion: 0,
+      syncError: null,
+    },
   });
   return problems;
 }

@@ -1,0 +1,40 @@
+# $coverTags comes from the transform's "vars" metafield ({"coverTags": [...]},
+# written by app/lib/cart-transform.server.ts).
+query CartTransformRunInput($coverTags: [String!] = []) {
+  presentmentCurrencyRate
+  localization {
+    country {
+      isoCode
+    }
+  }
+  cart {
+    lines {
+      id
+      quantity
+      cost {
+        subtotalAmount {
+          amount
+        }
+      }
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          requiresShipping
+          product {
+            id
+            isGiftCard
+            productType
+            vendor
+            hasAnyTag(tags: $coverTags)
+          }
+        }
+      }
+    }
+  }
+  cartTransform {
+    metafield(namespace: "$app:shipping-protection", key: "config") {
+      jsonValue
+    }
+  }
+}

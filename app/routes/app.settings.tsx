@@ -33,15 +33,22 @@ import { uploadsConfigured } from "../lib/blob.server";
 import { emailConfigured } from "../lib/email.server";
 import type { ClaimSettings } from "../lib/claims";
 import { EMBED_HANDLE, embedStatus } from "../lib/embed.server";
+import { listMarkets } from "../lib/markets.server";
+import { exactPricingAvailable } from "../lib/cart-transform.server";
+import { MAX_MARKET_PRICES } from "../lib/settings";
 import type { TrackingSettings } from "../lib/tracking";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
-  const embed = await embedStatus(admin).catch(() => ({ status: "unknown" as const }));
+  const [embed, plus] = await Promise.all([
+    embedStatus(admin).catch(() => ({ status: "unknown" as const })),
+    exactPricingAvailable(admin),
+  ]);
   const apiKey = process.env.SHOPIFY_API_KEY || "";
   return {
     embed: embed.status,
+    plus,
     embedUrl: `shopify://admin/themes/current/editor?context=apps&activateAppId=${apiKey}/${EMBED_HANDLE}`,
     settings: shop.settings ? parseSettings(shop.settings) : DEFAULT_SETTINGS,
     configured: shop.settings !== null && shop.productId !== null,
@@ -53,12 +60,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   };
 };
 
-type ActionResult = { ok: true; intent: string; problems?: string[] } | { ok: false; errors: string[] };
+type MarketRow = { id: number; name: string; currency: string; countries: string[] };
+type ActionResult =
+  | { ok: true; intent: string; problems?: string[]; warnings?: string[]; markets?: MarketRow[] }
+  | { ok: false; errors: string[] };
 
 export const action = async ({ request }: ActionFunctionArgs): Promise<ActionResult> => {
   const { session, admin } = await authenticate.admin(request);
   await ensureShop(session.shop);
   const body = (await request.json()) as { intent?: string; settings?: unknown };
+
+  if (body.intent === "markets") {
+    try {
+      const markets = await listMarkets(admin);
+      return {
+        ok: true,
+        intent: "markets",
+        markets: markets.map((m) => ({ id: m.id, name: m.name, currency: m.currency, countries: m.countries })),
+      };
+    } catch (err) {
+      return { ok: false, errors: [`Couldn't load your markets: ${err instanceof Error ? err.message : String(err)}`] };
+    }
+  }
 
   if (body.intent === "remove") {
     const problems = await removeFromStore(admin, session.shop);
@@ -76,14 +99,14 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionRes
     data: { settings: settings as object, version: { increment: 1 } },
   });
   try {
-    await syncProtection(admin, session.shop);
+    const { warnings } = await syncProtection(admin, session.shop);
+    return { ok: true, intent: "save", warnings };
   } catch (err) {
     return {
       ok: false,
       errors: [`Saved, but your store couldn't be updated: ${err instanceof Error ? err.message : String(err)}`],
     };
   }
-  return { ok: true, intent: "save" };
 };
 
 /** Sample cart values sized to the currency (¥10 isn't a cart). */
@@ -207,6 +230,15 @@ export default function SettingsPage() {
         Save
       </s-button>
 
+      {fetcher.data?.ok && fetcher.data.intent === "save" && (fetcher.data.warnings?.length ?? 0) > 0 && (
+        <s-banner tone="warning" heading="Saved, with something to check">
+          <s-unordered-list>
+            {fetcher.data.warnings!.map((w) => (
+              <s-list-item key={w}>{w}</s-list-item>
+            ))}
+          </s-unordered-list>
+        </s-banner>
+      )}
       {fetcher.data && !fetcher.data.ok && (
         <s-banner tone="critical" heading="Not saved">
           <s-unordered-list>
@@ -361,6 +393,39 @@ export default function SettingsPage() {
           {field("Only offer from a cart value of", s.rules.minSubtotal, (n) => setRules({ minSubtotal: n }), {
             details: "0 = always offer it.",
           })}
+        </s-stack>
+      </s-section>
+
+      <MarketPricesSection
+        value={s.marketPrices}
+        onChange={(marketPrices) => setS({ ...s, marketPrices })}
+      />
+
+      <s-section heading="Exact pricing (Shopify Plus)">
+        <s-stack direction="block" gap="base">
+          {loaded.plus ? (
+            <>
+              <ScopeGate scopes={["write_cart_transforms"]} what="adjust cart prices">
+                <s-checkbox
+                  label="Charge the exact percentage fee"
+                  details="Uses a cart transform so customers pay exactly the calculated fee instead of the nearest price point. Fixed fees and market prices are already exact."
+                  checked={s.exactPricing}
+                  onChange={(e) => setS({ ...s, exactPricing: e.currentTarget.checked })}
+                />
+              </ScopeGate>
+            </>
+          ) : (
+            <s-paragraph>
+              On Shopify Plus, SafeShip can charge the exact percentage fee instead of the nearest of its price points
+              (always within about 1.5%). Shopify only allows this on Plus.
+            </s-paragraph>
+          )}
+          <s-text type="strong">Checkout toggle</s-text>
+          <s-paragraph>
+            {loaded.plus
+              ? "You can also let customers add or remove protection in checkout itself: in Shopify, open Settings → Checkout → Customize, click Add app block, choose “Shipping protection toggle” and save."
+              : "On Shopify Plus, customers can also add or remove protection inside checkout with SafeShip's checkout block. On other plans they choose in the cart."}
+          </s-paragraph>
         </s-stack>
       </s-section>
 
@@ -696,6 +761,121 @@ export default function SettingsPage() {
         </s-section>
       )}
     </s-page>
+  );
+}
+
+/** Children only once the optional scopes are granted; otherwise an Allow button. */
+function ScopeGate({ scopes, what, children }: { scopes: string[]; what: string; children: React.ReactNode }) {
+  const shopify = useAppBridge();
+  const [granted, setGranted] = useState<string[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    shopify.scopes
+      .query()
+      .then((d) => live && setGranted(d.granted))
+      .catch(() => live && setGranted([]));
+    return () => {
+      live = false;
+    };
+  }, [shopify]);
+  if (granted === null) return null;
+  const missing = scopes.filter((x) => !granted.includes(x));
+  if (!missing.length) return <>{children}</>;
+  return (
+    <s-banner tone="info" heading="Permission needed">
+      SafeShip needs your permission to {what}.{" "}
+      <s-button
+        onClick={() =>
+          shopify.scopes
+            .request(missing)
+            .then(() => shopify.scopes.query())
+            .then((d) => setGranted(d.granted))
+            .catch(() => {})
+        }
+      >
+        Allow
+      </s-button>
+    </s-banner>
+  );
+}
+
+/** Fixed fees per Shopify market, in each market's currency. */
+function MarketPricesSection({
+  value,
+  onChange,
+}: {
+  value: Settings["marketPrices"];
+  onChange: (v: Settings["marketPrices"]) => void;
+}) {
+  const fetcher = useFetcher<ActionResult>();
+  const markets = fetcher.data?.ok ? (fetcher.data.markets ?? null) : null;
+  const error = fetcher.data && !fetcher.data.ok ? fetcher.data.errors[0] : null;
+  const load = () => fetcher.submit({ intent: "markets" } as never, { method: "POST", encType: "application/json" });
+  const set = (marketId: number, patch: Partial<Settings["marketPrices"][number]>) =>
+    onChange(value.map((m) => (m.marketId === marketId ? { ...m, ...patch } : m)));
+  const unused = (markets ?? []).filter((m) => !value.some((v) => v.marketId === m.id));
+
+  return (
+    <s-section heading="Prices by market (optional)">
+      <s-stack direction="block" gap="base">
+        <s-paragraph>
+          Charge a fixed fee in a market&apos;s own currency — for example €2.99 in Europe — instead of your pricing
+          above converted. The fee is set in that market&apos;s price list in Shopify Markets.
+        </s-paragraph>
+        {value.map((m) => (
+          <s-grid key={m.marketId} gridTemplateColumns="2fr 1fr auto" gap="small-200" alignItems="end">
+            <s-text>
+              {m.name || `Market ${m.marketId}`}
+              {markets && !markets.some((x) => x.id === m.marketId) ? " (not found — remove it)" : ""}
+            </s-text>
+            <s-number-field
+              label="Fee"
+              min={0}
+              step={0.01}
+              suffix={m.currency}
+              value={Number.isFinite(m.amount) ? String(m.amount) : ""}
+              onInput={(e) => set(m.marketId, { amount: Number(e.currentTarget.value) })}
+            />
+            <s-button
+              variant="tertiary"
+              tone="critical"
+              onClick={() => onChange(value.filter((x) => x.marketId !== m.marketId))}
+            >
+              Remove
+            </s-button>
+          </s-grid>
+        ))}
+        <ScopeGate scopes={["read_markets"]} what="read your markets">
+          {markets === null ? (
+            <s-stack direction="inline" gap="small-200">
+              <s-button onClick={load} {...(fetcher.state !== "idle" ? { loading: true } : {})}>
+                {value.length ? "Add another market" : "Choose markets"}
+              </s-button>
+            </s-stack>
+          ) : unused.length === 0 ? (
+            <s-text color="subdued">All your active markets have a price.</s-text>
+          ) : (
+            <s-stack direction="inline" gap="small-200">
+              {unused.slice(0, MAX_MARKET_PRICES - value.length).map((m) => (
+                <s-button
+                  key={m.id}
+                  onClick={() =>
+                    onChange([...value, { marketId: m.id, name: m.name, currency: m.currency, amount: NaN }])
+                  }
+                >
+                  + {m.name} ({m.currency})
+                </s-button>
+              ))}
+            </s-stack>
+          )}
+        </ScopeGate>
+        {error && <s-banner tone="critical">{error}</s-banner>}
+        <s-text color="subdued">
+          Customers in a market with a price here pay exactly that, whatever the cart value — protection is still only
+          offered from your minimum cart value. Save to apply.
+        </s-text>
+      </s-stack>
+    </s-section>
   );
 }
 

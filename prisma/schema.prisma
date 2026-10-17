@@ -54,6 +54,8 @@ model Shop {
   productId     String? // gid://shopify/Product/…
   productHandle String?
   validationId  String? // gid://shopify/Validation/…
+  // Exact pricing (Plus): the protection-transform cart transform, when on.
+  cartTransformId String?
 
   // Storefront path of the app proxy ("/apps/safeship"; merchants can
   // rename the subpath). Learnt from each proxy request, used to build the

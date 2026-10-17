@@ -32,6 +32,44 @@ export interface Settings {
   coverageProductTitles: Record<string, string>;
   /** When a package counts as stalled, late or possibly lost (./tracking.ts). */
   tracking: TrackingSettings;
+  /**
+   * Fixed fees per Shopify market, in the market's currency
+   * (app/lib/markets.server.ts). name/currency are for display; the sync
+   * re-reads both from Shopify.
+   */
+  marketPrices: MarketPriceSetting[];
+  /** Plus only: charge the exact fee with a cart transform (app/lib/cart-transform.server.ts). */
+  exactPricing: boolean;
+}
+
+export interface MarketPriceSetting {
+  marketId: number;
+  name: string;
+  currency: string;
+  amount: number;
+}
+
+export const MAX_MARKET_PRICES = 20;
+
+function parseMarketPrices(raw: unknown): MarketPriceSetting[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<number>();
+  const out: MarketPriceSetting[] = [];
+  for (const r of raw.slice(0, 50)) {
+    const o = (r && typeof r === "object" ? r : {}) as Record<string, unknown>;
+    const marketId = Number(o.marketId);
+    const amount = Math.round(num(o.amount, 0) * 100) / 100;
+    if (!Number.isSafeInteger(marketId) || marketId <= 0 || seen.has(marketId)) continue;
+    seen.add(marketId);
+    out.push({
+      marketId,
+      name: str(o.name, 120),
+      currency: /^[A-Z]{3}$/.test(String(o.currency)) ? String(o.currency) : "",
+      amount,
+    });
+    if (out.length >= MAX_MARKET_PRICES) break;
+  }
+  return out;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -47,6 +85,8 @@ export const DEFAULT_SETTINGS: Settings = {
   coverage: DEFAULT_COVERAGE,
   coverageProductTitles: {},
   tracking: DEFAULT_TRACKING_SETTINGS,
+  marketPrices: [],
+  exactPricing: false,
 };
 
 const num = (v: unknown, fallback: number) => {
@@ -133,6 +173,8 @@ export function parseSettings(raw: unknown): Settings {
     coverage: parseCoverage(o.coverage),
     coverageProductTitles: titles(o.coverageProductTitles, parseCoverage(o.coverage).productIds),
     tracking: parseTrackingSettings(o.tracking),
+    marketPrices: parseMarketPrices(o.marketPrices),
+    exactPricing: o.exactPricing === true,
   };
 }
 
@@ -148,6 +190,9 @@ function titles(raw: unknown, ids: number[]): Record<string, string> {
 
 export const settingsErrors = (s: Settings): string[] => {
   const errs = rulesErrors(s.rules);
+  for (const m of s.marketPrices) {
+    if (!(m.amount > 0)) errs.push(`Enter a fee above 0 for ${m.name || "each market"}, or remove it.`);
+  }
   if (s.coverage.mode === "ONLY" && !coverageHasRules(s.coverage)) {
     errs.push("“Only products that match” needs at least one tag, product type, vendor or product.");
   }

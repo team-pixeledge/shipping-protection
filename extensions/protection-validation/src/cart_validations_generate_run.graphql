@@ -9,6 +9,9 @@ query CartValidationsGenerateRunInput($coverTags: [String!] = []) {
     language {
       isoCode
     }
+    country {
+      isoCode
+    }
   }
   cart {
     lines {

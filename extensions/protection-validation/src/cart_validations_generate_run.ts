@@ -16,7 +16,7 @@ import { cartProblems, type CartLine, type Problem, type ProtectionConfig } from
 interface Input {
   buyerJourney: { step?: string | null };
   presentmentCurrencyRate: string | number;
-  localization: { language: { isoCode: string } };
+  localization: { language: { isoCode: string }; country?: { isoCode: string } | null };
   cart: {
     lines: {
       quantity: number;
@@ -101,7 +101,7 @@ export function cartValidationsGenerateRun(input: Input): Result {
     tagMatch: l.merchandise.product?.hasAnyTag,
   }));
   const rate = Number(input.presentmentCurrencyRate) || 1;
-  const problems = cartProblems(cfg, lines, rate);
+  const problems = cartProblems(cfg, lines, rate, input.localization.country?.isoCode);
   const lang = input.localization.language.isoCode.split("_")[0];
   const text = MESSAGES[lang] ?? MESSAGES.EN;
   return {

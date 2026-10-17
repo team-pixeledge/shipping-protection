@@ -12,8 +12,10 @@
 //      the order page.
 // Idempotent: run it again and it converges. Saving settings runs it.
 import prisma from "../db.server";
-import { buildLadder, type ProtectionConfig } from "../../shared/pricing";
+import { buildLadder, toMinor, type ProtectionConfig } from "../../shared/pricing";
 import { currencyDecimals, parseSettings } from "./settings";
+import { applyMarketPrices, listMarkets, planMarketPrices, type PlannedMarketPrice } from "./markets.server";
+import { setTransformConfig, syncCartTransform } from "./cart-transform.server";
 
 export interface AdminGraphql {
   graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response>;
@@ -23,6 +25,7 @@ export const OPTION_NAME = "Fee";
 export const FUNCTION_HANDLE = "protection-validation";
 export const CONFIG_NAMESPACE = "shipping_protection"; // app-installation metafield (Liquid)
 export const VALIDATION_NAMESPACE = "$app:shipping-protection"; // must match the function's input query
+export const CHECKOUT_NAMESPACE = "$app:shipping-protection"; // shop metafield, read by extensions/protection-checkout
 export const ORDER_NAMESPACE = "shipping_protection";
 export const ORDER_KEY = "details";
 const BATCH = 100;
@@ -156,10 +159,18 @@ async function listVariants(admin: AdminGraphql, productId: string): Promise<Var
   }
 }
 
+/** An extra variant beside the ladder: a market's fixed price ("2.99 EUR"). */
+export interface ExtraVariant {
+  label: string;
+  /** Base price (shop currency); the market's price list overrides it. */
+  price: string;
+}
+
 /**
- * Makes the product's variants exactly the ladder: keeps variants whose
- * price is still on it (so carts holding them stay valid), creates the
- * missing ones, deletes the rest. Returns [price minor, variant ID] pairs.
+ * Makes the product's variants exactly the ladder (plus `extras`): keeps
+ * variants whose price is still on it (so carts holding them stay valid),
+ * creates the missing ones, deletes the rest. Returns [price minor, variant
+ * ID] pairs for the ladder and label → variant ID for the extras.
  */
 async function syncVariants(
   admin: AdminGraphql,
@@ -167,8 +178,14 @@ async function syncVariants(
   ladder: number[],
   decimals: number,
   taxable: boolean,
-): Promise<[number, number][]> {
-  const wanted = new Map(ladder.map((p) => [label(p, decimals), p]));
+  extras: ExtraVariant[] = [],
+): Promise<{ pairs: [number, number][]; extraIds: Map<string, number> }> {
+  const ladderLabels = new Map(ladder.map((p) => [label(p, decimals), p]));
+  // label → price string, for every variant the product should have.
+  const wanted = new Map<string, string>([
+    ...[...ladderLabels.keys()].map((l) => [l, l] as [string, string]),
+    ...extras.map((e) => [e.label, e.price] as [string, string]),
+  ]);
   const existing = await listVariants(admin, productId);
   const kept = new Map<string, VariantRow>();
   const toDelete: string[] = [];
@@ -186,16 +203,16 @@ async function syncVariants(
   const toUpdate = [...kept.entries()]
     .filter(
       ([value, v]) =>
-        Number(v.price) !== Number(value) ||
+        Number(v.price) !== Number(wanted.get(value)) ||
         v.taxable !== taxable ||
         v.inventoryPolicy !== "CONTINUE" ||
         v.inventoryItem.tracked ||
         v.inventoryItem.requiresShipping,
     )
-    .map(([value, v]) => ({ id: v.id, price: value, ...common }));
+    .map(([value, v]) => ({ id: v.id, price: wanted.get(value)!, ...common }));
   const toCreate = [...wanted.keys()]
     .filter((value) => !kept.has(value))
-    .map((value) => ({ price: value, optionValues: [{ optionName: OPTION_NAME, name: value }], ...common }));
+    .map((value) => ({ price: wanted.get(value)!, optionValues: [{ optionName: OPTION_NAME, name: value }], ...common }));
 
   // Create before deleting: a product can't be left with zero variants.
   for (let i = 0; i < toCreate.length; i += BATCH) {
@@ -243,12 +260,18 @@ async function syncVariants(
     final.map((v) => [v.selectedOptions.find((o) => o.name === OPTION_NAME)?.value ?? "", numericId(v.id)]),
   );
   const pairs: [number, number][] = [];
-  for (const [value, minor] of wanted) {
+  for (const [value, minor] of ladderLabels) {
     const id = byValue.get(value);
     if (!id) throw new Error(`Price variant ${value} is missing after sync`);
     pairs.push([minor, id]);
   }
-  return pairs.sort((a, b) => a[0] - b[0]);
+  const extraIds = new Map<string, number>();
+  for (const e of extras) {
+    const id = byValue.get(e.label);
+    if (!id) throw new Error(`Market variant ${e.label} is missing after sync`);
+    extraIds.set(e.label, id);
+  }
+  return { pairs: pairs.sort((a, b) => a[0] - b[0]), extraIds };
 }
 
 export type PublicationNode = {
@@ -296,7 +319,12 @@ async function publishToOnlineStore(admin: AdminGraphql, productId: string) {
 
 // ---- Metafields + validation ----
 
-async function setInstallationConfig(admin: AdminGraphql, value: string) {
+/**
+ * The config where each surface can read it: an app-installation metafield
+ * for Liquid, and the same JSON as a $app shop metafield for the checkout
+ * UI extension (checkout can't read app-installation metafields).
+ */
+async function setInstallationConfig(admin: AdminGraphql, value: string, shopGid: string) {
   const data = await gql<{
     currentAppInstallation: { id: string };
   }>(admin, `#graphql
@@ -316,6 +344,7 @@ async function setInstallationConfig(admin: AdminGraphql, value: string) {
           type: "json",
           value,
         },
+        { ownerId: shopGid, namespace: CHECKOUT_NAMESPACE, key: "config", type: "json", value },
       ],
     },
   );
@@ -397,19 +426,39 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
   const row = await prisma.shop.findUniqueOrThrow({ where: { shop } });
   const settings = parseSettings(row.settings);
   try {
-    const info = await gql<{ shop: { currencyCode: string } }>(
+    const info = await gql<{ shop: { id: string; currencyCode: string } }>(
       admin,
       `#graphql
-      query SpShop { shop { currencyCode } }`,
+      query SpShop { shop { id currencyCode } }`,
     );
     const currency = info.shop.currencyCode;
     const decimals = currencyDecimals(currency);
     const prices = buildLadder(settings.rules, decimals);
     if (!prices.length) throw new Error("These pricing settings don't produce any fee — check the amounts.");
 
+    // Market prices need the markets' currencies before the variants exist.
+    let planned: PlannedMarketPrice[] = [];
+    const warnings: string[] = [];
+    if (settings.marketPrices.length) {
+      let markets;
+      try {
+        markets = await listMarkets(admin);
+      } catch (err) {
+        throw new Error(
+          `Market prices need access to your markets — click “Allow access” under Prices by market, then save again. (${err instanceof Error ? err.message : err})`,
+        );
+      }
+      const plan = planMarketPrices(markets, settings.marketPrices);
+      planned = plan.planned;
+      warnings.push(...plan.warnings);
+    }
+    const extras = [...new Map(planned.map((p) => [p.label, { label: p.label, price: label(Math.max(1, toMinor(p.amount, decimals)), decimals) }])).values()];
+
     const product = await ensureProduct(admin, row.productId, label(prices[0], decimals));
-    const ladder = await syncVariants(admin, product.id, prices, decimals, settings.taxable);
+    const { pairs: ladder, extraIds } = await syncVariants(admin, product.id, prices, decimals, settings.taxable, extras);
     await publishToOnlineStore(admin, product.id);
+    const markets = await applyMarketPrices(admin, planned, extraIds);
+    const exact = await syncCartTransform(admin, settings.exactPricing, row.cartTransformId);
 
     const config: ProtectionConfig = {
       v: row.version,
@@ -424,13 +473,16 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
       optInCountries: settings.optInCountries,
       copy: settings.copy,
       coverage: settings.coverage,
+      ...(markets.length ? { markets } : {}),
+      ...(exact.active ? { exact: true } : {}),
     };
     const value = JSON.stringify(config);
-    await setInstallationConfig(admin, value);
+    await setInstallationConfig(admin, value, info.shop.id);
     // The function's input variables: hasAnyTag needs the tags as a query
     // variable, which Shopify reads from this metafield on the validation.
     const vars = JSON.stringify({ coverTags: settings.coverage.mode === "ALL" ? [] : settings.coverage.tags });
     const validationId = await ensureValidation(admin, row.validationId, value, vars);
+    if (exact.active && exact.id) await setTransformConfig(admin, exact.id, value, vars);
     await ensureOrderMetafieldDefinition(admin);
 
     await prisma.shop.update({
@@ -440,11 +492,12 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
         productId: product.id,
         productHandle: product.handle,
         validationId,
+        cartTransformId: exact.id,
         syncedVersion: row.version,
         syncError: null,
       },
     });
-    return config;
+    return { config, warnings: [...warnings, ...exact.warnings] };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await prisma.shop.update({ where: { shop }, data: { syncError: message.slice(0, 500) } });

@@ -1,0 +1,24 @@
+# Shipping protection toggle inside checkout. Checkout blocks on the
+# information, shipping and payment steps are Shopify Plus only; merchants
+# place it in the checkout editor (Settings → Checkout → Customize).
+api_version = "2026-10"
+
+[[extensions]]
+name = "t:name"
+handle = "protection-checkout"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/Checkout.jsx"
+target = "purchase.checkout.block.render"
+
+  # The protection config, written by app/lib/setup.server.ts as a $app
+  # shop metafield (checkout can't read app-installation metafields).
+  [[extensions.targeting.metafields]]
+  namespace = "$app:shipping-protection"
+  key = "config"
+
+[extensions.capabilities]
+# Storefront API: the presentment price of a protection variant, to convert
+# the shop-currency rules into the buyer's currency.
+api_access = true

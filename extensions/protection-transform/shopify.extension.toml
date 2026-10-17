@@ -1,0 +1,24 @@
+# Plus stores only (Shopify allows lineUpdate on Plus and development stores):
+# sets the protection line to the exact fee. Registered by
+# app/lib/cart-transform.server.ts when the merchant turns on exact pricing.
+api_version = "2026-07"
+
+[[extensions]]
+name = "t:name"
+handle = "protection-transform"
+type = "function"
+description = "t:description"
+
+  # Coverage tags for product.hasAnyTag, as for the validation.
+  [extensions.input.variables]
+  namespace = "$app:shipping-protection"
+  key = "vars"
+
+  [[extensions.targeting]]
+  target = "cart.transform.run"
+  input_query = "src/cart_transform_run.graphql"
+  export = "cart-transform-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"

@@ -36,7 +36,16 @@ scopes = "write_products,read_publications,write_publications,read_orders,write_
 # SCOPES env var:
 # write_draft_orders: free replacement orders for approved claims.
 # write_store_credit_account_transactions: store credit for approved claims.
-optional_scopes = ["write_draft_orders", "write_store_credit_account_transactions"]
+# read_markets: Settings → Prices by market (list markets, their currencies
+#   and price lists; the fixed prices themselves need only write_products).
+# write_cart_transforms: Settings → Exact pricing (Plus): the
+#   protection-transform cart transform.
+optional_scopes = [
+  "write_draft_orders",
+  "write_store_credit_account_transactions",
+  "read_markets",
+  "write_cart_transforms",
+]
 
 [auth]
 redirect_urls = ["https://safeship-app.vercel.app/auth/callback"]

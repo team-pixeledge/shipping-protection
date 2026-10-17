@@ -87,6 +87,33 @@ export function lineCovered(c: Coverage | undefined, l: CartLine): boolean {
   return cov.mode === "ONLY" ? match : !match;
 }
 
+// ---- Fixed prices per market ----
+
+/**
+ * A market where protection costs a fixed amount in the market's own
+ * currency, whatever the pricing mode. Charged through a dedicated variant
+ * whose price the market's price list fixes (app/lib/markets.server.ts).
+ */
+export interface MarketPrice {
+  /** Numeric Shopify market ID. */
+  marketId: number;
+  name: string;
+  /** Countries in the market, ISO codes, upper case. */
+  countries: string[];
+  /** The fee, in `currency` (the market's price list currency). */
+  amount: number;
+  currency: string;
+  /** The protection variant this market's price list prices at `amount`. */
+  variantId: number;
+}
+
+/** The market price for a shopper's country, if the merchant set one. */
+export function marketFor(cfg: Pick<ProtectionConfig, "markets">, country: string | null | undefined): MarketPrice | null {
+  const c = (country ?? "").toUpperCase();
+  if (!c || !cfg.markets?.length) return null;
+  return cfg.markets.find((m) => m.countries.includes(c)) ?? null;
+}
+
 /** What the storefront and the validation function read (a metafield). */
 export interface ProtectionConfig {
   /** Bumped on every save; the widget re-checks the cart when it changes. */
@@ -107,6 +134,13 @@ export interface ProtectionConfig {
   copy: { title: string; description: string; learnMoreUrl: string };
   /** Which products are covered. Missing in configs saved before it existed = ALL. */
   coverage?: Coverage;
+  /** Fixed prices per market. Missing = none. */
+  markets?: MarketPrice[];
+  /**
+   * Plus stores with exact pricing on: a cart transform sets the protection
+   * line to the exact fee, so the variant only needs to be close.
+   */
+  exact?: boolean;
 }
 
 /**
@@ -252,13 +286,28 @@ export interface Quote {
   /** The ladder price actually charged, shop currency minor units. */
   priceMinor: number;
   variantId: number;
+  /** In a market with a fixed price: what the shopper pays, in that market's currency. */
+  fixed?: { amount: number; currency: string };
 }
 
-/** The variant to add for a subtotal in shop currency, or null if not offered. */
-export function quote(cfg: ProtectionConfig, subtotal: number): Quote | null {
+/**
+ * The variant to add for a subtotal in shop currency, or null if not
+ * offered. In a market with a fixed price, that market's variant — still
+ * only when protection is offered for the cart at all.
+ */
+export function quote(cfg: ProtectionConfig, subtotal: number, country?: string | null): Quote | null {
   if (!cfg.enabled || !cfg.ladder.length) return null;
   const fee = computeFee(cfg.rules, subtotal);
   if (fee === null) return null;
+  const market = marketFor(cfg, country);
+  if (market) {
+    return {
+      fee,
+      priceMinor: toMinor(market.amount, cfg.decimals),
+      variantId: market.variantId,
+      fixed: { amount: market.amount, currency: market.currency },
+    };
+  }
   const prices = cfg.ladder.map(([p]) => p);
   const [priceMinor, variantId] = cfg.ladder[snapIndex(prices, toMinor(fee, cfg.decimals))];
   return { fee, priceMinor, variantId };
@@ -297,10 +346,13 @@ export type Problem = "DUPLICATE" | "ALONE" | "UNAVAILABLE" | "PRICE";
  * later), and blocking a real customer's checkout costs more than a few
  * cents of drift. ±3% of the fee, plus one ladder step either side.
  */
-export function acceptedVariants(cfg: ProtectionConfig, subtotal: number): Set<number> {
+export function acceptedVariants(cfg: ProtectionConfig, subtotal: number, country?: string | null): Set<number> {
   const out = new Set<number>();
   const fee = computeFee(cfg.rules, subtotal);
   if (fee === null || !cfg.ladder.length) return out;
+  // A market with a fixed price accepts only its own variant.
+  const market = marketFor(cfg, country);
+  if (market) return out.add(market.variantId);
   const prices = cfg.ladder.map(([p]) => p);
   const from = Math.max(0, snapIndex(prices, toMinor(fee * 0.97, cfg.decimals)) - 1);
   const to = Math.min(prices.length - 1, snapIndex(prices, toMinor(fee * 1.03, cfg.decimals)) + 1);
@@ -310,9 +362,10 @@ export function acceptedVariants(cfg: ProtectionConfig, subtotal: number): Set<n
 
 /**
  * What's wrong with the protection in this cart, if anything.
- * `rate` = presentment currency per unit of shop currency (1 when equal).
+ * `rate` = presentment currency per unit of shop currency (1 when equal);
+ * `country` = the buyer's country (market prices).
  */
-export function cartProblems(cfg: ProtectionConfig, lines: CartLine[], rate: number): Problem[] {
+export function cartProblems(cfg: ProtectionConfig, lines: CartLine[], rate: number, country?: string | null): Problem[] {
   const isProtection = (l: CartLine) => l.productId === cfg.productId;
   const prot = lines.filter(isProtection);
   if (!prot.length) return [];
@@ -327,7 +380,7 @@ export function cartProblems(cfg: ProtectionConfig, lines: CartLine[], rate: num
     return problems;
   }
   const subtotal = covered.reduce((s, l) => s + l.subtotal, 0) / (rate > 0 ? rate : 1);
-  const accepted = acceptedVariants(cfg, subtotal);
+  const accepted = acceptedVariants(cfg, subtotal, country);
   if (!accepted.size) problems.push("UNAVAILABLE");
   else if (prot.some((l) => l.variantId === null || !accepted.has(l.variantId))) problems.push("PRICE");
   return problems;
