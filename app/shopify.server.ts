@@ -20,6 +20,11 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
+  // Shopify rejects non-expiring offline tokens on the Admin API (403 on
+  // every call, billing included). Keep this on.
+  future: {
+    expiringOfflineAccessTokens: true,
+  },
   // One usage subscription per plan (app/lib/plan.ts): amount is the
   // cycle's cap; each protected order past the free ones is a usage record
   // (billing.server.ts). Switching plans replaces the subscription at once.

@@ -78,64 +78,9 @@ export const action = async ({
     // Billing API). Show its reason instead of crashing the page.
     const reason = shopifyReason(err);
     console.error(`[billing] subscription request failed on ${session.shop}: ${reason}`);
-    await diagnose(session.shop, session.accessToken, PLANS[target], shop.billingTest);
     return { ok: false, error: `Shopify couldn't start the plan: ${reason}` };
   }
 };
-
-// TEMPORARY: the GraphQL client drops Shopify's 403 body. Repeat the calls
-// raw and log status + body so we can see the real reason. Remove after.
-async function diagnose(
-  shop: string,
-  token: string | undefined,
-  plan: (typeof PLANS)[PlanId],
-  test: boolean,
-) {
-  const call = async (label: string, query: string, variables?: object) => {
-    try {
-      const res = await fetch(
-        `https://${shop}/admin/api/2026-10/graphql.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": token ?? "",
-          },
-          body: JSON.stringify({ query, variables }),
-        },
-      );
-      const text = await res.text();
-      console.error(`[billing-diag] ${label}: ${res.status} ${text.slice(0, 1500)}`);
-    } catch (e) {
-      console.error(`[billing-diag] ${label}: fetch failed`, e);
-    }
-  };
-  console.error(`[billing-diag] token present: ${!!token}, test: ${test}`);
-  await call("basic", `{ shop { name plan { partnerDevelopment displayName } } currentAppInstallation { id accessScopes { handle } } }`);
-  await call(
-    "subscribe",
-    `mutation D($name: String!, $returnUrl: URL!, $test: Boolean, $lineItems: [AppSubscriptionLineItemInput!]!) {
-      appSubscriptionCreate(name: $name, returnUrl: $returnUrl, test: $test, lineItems: $lineItems) {
-        confirmationUrl userErrors { field message }
-      }
-    }`,
-    {
-      name: plan.billingName,
-      returnUrl: `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/, "")}/apps`,
-      test,
-      lineItems: [
-        {
-          plan: {
-            appUsagePricingDetails: {
-              cappedAmount: { amount: plan.cap, currencyCode: plan.currency },
-              terms: `${plan.name} diagnostic`,
-            },
-          },
-        },
-      ],
-    },
-  );
-}
 
 /** The message(s) Shopify sent with a failed Admin API call. */
 function shopifyReason(err: unknown): string {
