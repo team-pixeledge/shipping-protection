@@ -63,7 +63,7 @@ export async function recordOrder(admin: AdminGraphql | null, shop: string, p: O
     update: { protected: d.protected, choice: d.choice, fee: d.fee },
   });
 
-  if (!admin) return;
+  if (!admin) return d;
   const gid = `gid://shopify/Order/${orderId}`;
   const res = await admin.graphql(
     `#graphql
@@ -97,4 +97,5 @@ export async function recordOrder(admin: AdminGraphql | null, shop: string, p: O
       { variables: { id: gid, tags: [PROTECTED_TAG] } },
     );
   }
+  return d;
 }

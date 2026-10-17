@@ -60,11 +60,16 @@ model Shop {
   // claim links sent by email.
   portalPath    String    @default("/apps/safeship")
 
+  // Development or sandbox store: charges are test charges (no money moves).
+  // Set on every auth from shop.plan.partnerDevelopment (or BILLING_TEST=true).
+  billingTest   Boolean   @default(false)
+
   updatedAt DateTime @updatedAt
 
   orders    OrderRecord[]
   claims    Claim[]
   shipments Shipment[]
+  usage     UsageCharge[]
 }
 
 // One row per order seen by orders/create — protected or not — for the
@@ -267,4 +272,28 @@ model RateLimit {
   resetAt DateTime
 
   @@index([resetAt])
+}
+
+// Billing: one row per protected order, recording whether it fell in the
+// billing cycle's free allowance or was charged as a Shopify usage record
+// (app/lib/billing.server.ts). The unique key makes webhook retries safe.
+model UsageCharge {
+  shop        String
+  orderId     String
+  orderName   String
+  // FREE (within the cycle's free orders) | CHARGED | CAPPED (the monthly
+  // cap was reached) | NO_PLAN (no active subscription) | FAILED
+  status      String
+  amount      Decimal  @db.Decimal(10, 2) // USD charged (0 unless CHARGED)
+  // The subscription cycle's end, which groups rows into cycles.
+  periodEnd   DateTime?
+  usageRecordId String?
+  error       String?
+  test        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  shopRef Shop @relation(fields: [shop], references: [shop], onDelete: Cascade)
+
+  @@id([shop, orderId])
+  @@index([shop, periodEnd])
 }

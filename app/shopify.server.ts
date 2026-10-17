@@ -2,11 +2,13 @@ import "@shopify/shopify-app-react-router/adapters/node";
 import {
   ApiVersion,
   AppDistribution,
+  BillingInterval,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { ensureShop } from "./lib/shop.server";
+import { PLAN, PLAN_TERMS } from "./lib/plan";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
@@ -17,6 +19,20 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
+  // One usage plan (app/lib/plan.ts): amount is the cycle's cap; each
+  // protected order past the free ones is a usage record (billing.server.ts).
+  billing: {
+    [PLAN.name]: {
+      lineItems: [
+        {
+          interval: BillingInterval.Usage,
+          amount: PLAN.cap,
+          currencyCode: PLAN.currency,
+          terms: PLAN_TERMS,
+        },
+      ],
+    },
+  },
   future: {
     expiringOfflineAccessTokens: true,
   },
@@ -25,9 +41,13 @@ const shopify = shopifyApp({
     // merchant saves Settings — installing changes nothing on the storefront.
     afterAuth: async ({ session, admin }) => {
       const res = await admin.graphql(`#graphql
-        query SpShopCurrency { shop { currencyCode } }`);
-      const json = (await res.json()) as { data?: { shop: { currencyCode: string } } };
-      await ensureShop(session.shop, json.data?.shop.currencyCode);
+        query SpShopCurrency { shop { currencyCode plan { partnerDevelopment } } }`);
+      const json = (await res.json()) as {
+        data?: { shop: { currencyCode: string; plan: { partnerDevelopment: boolean } } };
+      };
+      await ensureShop(session.shop, json.data?.shop.currencyCode, {
+        billingTest: process.env.BILLING_TEST === "true" || !!json.data?.shop.plan.partnerDevelopment,
+      });
     },
   },
   ...(process.env.SHOP_CUSTOM_DOMAIN

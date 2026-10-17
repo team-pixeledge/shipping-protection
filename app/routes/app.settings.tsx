@@ -32,12 +32,17 @@ import { ensureShop } from "../lib/shop.server";
 import { uploadsConfigured } from "../lib/blob.server";
 import { emailConfigured } from "../lib/email.server";
 import type { ClaimSettings } from "../lib/claims";
+import { EMBED_HANDLE, embedStatus } from "../lib/embed.server";
 import type { TrackingSettings } from "../lib/tracking";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
+  const embed = await embedStatus(admin).catch(() => ({ status: "unknown" as const }));
+  const apiKey = process.env.SHOPIFY_API_KEY || "";
   return {
+    embed: embed.status,
+    embedUrl: `shopify://admin/themes/current/editor?context=apps&activateAppId=${apiKey}/${EMBED_HANDLE}`,
     settings: shop.settings ? parseSettings(shop.settings) : DEFAULT_SETTINGS,
     configured: shop.settings !== null && shop.productId !== null,
     currency: shop.currency,
@@ -211,6 +216,61 @@ export default function SettingsPage() {
           </s-unordered-list>
         </s-banner>
       )}
+      <SetupGuide
+        steps={[
+          {
+            done: true,
+            title: "Approve the plan",
+            body: (
+              <>
+                Done — see <s-link href="/app/plan">Plan &amp; pricing</s-link> for what you pay and the FAQ.
+              </>
+            ),
+          },
+          {
+            done: loaded.configured,
+            title: "Choose your pricing and which products are covered, then Save",
+            body: "Pricing and “Which products are covered” below. The Preview shows what customers pay for sample carts. Saving creates the hidden Shipping protection product and the checkout rule in your store.",
+          },
+          {
+            done: loaded.embed === "on",
+            title: "Turn on the app embed in your theme",
+            body: (
+              <>
+                This shows the protection toggle in the cart drawer and cart page.{" "}
+                <s-link href={loaded.embedUrl} target="_top">
+                  Open the theme editor
+                </s-link>
+                , switch on &ldquo;Shipping protection&rdquo; and save the theme.
+                {loaded.embed === "unknown" && " (We couldn't check your theme — make sure it's on.)"}
+              </>
+            ),
+          },
+          {
+            done: loaded.configured,
+            title: "Decide whether protection starts ticked",
+            body: "“Default choice” below. Customers in the EU, EEA, UK and Switzerland always start unticked, as the law there requires.",
+          },
+          {
+            done: s.claims.enabled,
+            title: "Turn on the claims page (recommended)",
+            body: "Under Claims below. Then add the claims page link to your footer menu, shipping policy and order confirmation email so customers can find it.",
+          },
+          {
+            done: loaded.emailReady,
+            title: "Check that claim emails can be sent",
+            body: loaded.emailReady
+              ? "Claim emails are set up."
+              : "Claim emails aren't being sent yet: the app's email service isn't configured. Claims still work; customers just don't get emails.",
+          },
+          {
+            done: false,
+            title: "Place a test order",
+            body: "Add a product to your cart, check the protection toggle and the price, and complete checkout. The order appears on Home, tagged “Shipping protection”, and its package on Shipments once you fulfil it.",
+          },
+        ]}
+      />
+
       {!loaded.configured && (
         <s-banner tone="info" heading="Nothing is live yet">
           Saving this page creates the hidden &ldquo;Shipping protection&rdquo; product and the checkout rule in
@@ -636,6 +696,41 @@ export default function SettingsPage() {
         </s-section>
       )}
     </s-page>
+  );
+}
+
+/** "How to set up SafeShip": open until the first save, then folded away. */
+function SetupGuide({ steps }: { steps: { done: boolean; title: string; body: React.ReactNode }[] }) {
+  const left = steps.filter((x) => !x.done).length;
+  const allSet = steps.slice(0, 3).every((x) => x.done);
+  return (
+    <s-section>
+      <details open={!allSet}>
+        <summary style={{ cursor: "pointer", padding: "4px 0" }}>
+          <s-text type="strong">How to set up SafeShip</s-text>{" "}
+          <s-text color="subdued">{allSet ? "— you're live" : `— ${left} step${left === 1 ? "" : "s"} to go`}</s-text>
+        </summary>
+        <s-stack direction="block" gap="base">
+          <s-ordered-list>
+            {steps.map((x) => (
+              <s-list-item key={x.title}>
+                <s-stack direction="block" gap="small-100">
+                  <s-stack direction="inline" gap="small-200" alignItems="center">
+                    <s-text type="strong">{x.title}</s-text>
+                    {x.done && <s-badge tone="success">Done</s-badge>}
+                  </s-stack>
+                  <s-text color="subdued">{x.body}</s-text>
+                </s-stack>
+              </s-list-item>
+            ))}
+          </s-ordered-list>
+          <s-text color="subdued">
+            Good to know: everything you save here is pushed into Shopify, so protection keeps working at checkout even
+            if this app is ever unavailable. Settings are explained next to each field.
+          </s-text>
+        </s-stack>
+      </details>
+    </s-section>
   );
 }
 
