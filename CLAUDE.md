@@ -194,6 +194,116 @@ Phase 1 records a resolution but doesn't carry it out.
   real store yet:** the proxy itself, Blob client uploads through it
   (CORS), Resend delivery, and Level 2 email access.
 
+## Tracking and risk (claims phase 3, added 2026-10-17)
+
+- **Shipment rows** (`Shipment`, one per fulfillment) only for orders worth
+  following: protection bought (`OrderRecord.protected`) or a claim filed
+  (`shouldTrack`). All writes go through `storeShipments` /
+  `refreshOrderShipments` (`app/lib/tracking.server.ts`), from:
+  `fulfillments/*` + `fulfillment_events/create` webhooks (need
+  `read_fulfillments` — a required scope, so existing installs re-consent),
+  claim filing, the admin Refresh buttons and the daily job.
+- **Daily job** = Vercel Cron → `/api/cron/daily` (Bearer `CRON_SECRET`,
+  06:00 UTC, `maxDuration` 300; Hobby allows daily only). Per shop
+  (least-recently synced first): re-read open packages not checked for 12 h,
+  backfill protected orders with no rows (`OrderRecord.trackedAt` marks
+  "looked", ≤60 days), recompute time-based flags. Then orphan uploads
+  (unattached blobs > 24 h; tokens live ≤2 h so that's safe) and expired
+  `RateLimit` rows. Everything time-boxed; leftovers carry over.
+- **Stages/flags are pure** (`app/lib/tracking.ts`): `stageOf` maps
+  `displayStatus` (deliveredAt wins); flags NO_TRACKING, NOT_SCANNED,
+  STALLED (needs carrier events), LATE (needs an ETA), POSSIBLY_LOST,
+  CARRIER_EXCEPTION. Thresholds in `Settings.tracking`; 0 = off. Packages
+  stop being followed when delivered/cancelled or `FOLLOW_DAYS` (120) old.
+- **Claim flags** (`claimFlags(RiskInput)`) use only the packages holding the
+  claimed lines (`claimedShipments`, via `fulfillmentLineItems`). WARNING
+  flags vs SUPPORT flags (`CARRIER_*`, carrier data backing the story).
+  `reviewPriority` (Routine / Check details / Review carefully) ignores
+  support and dismissed flags. Dismissing needs a note (internal event);
+  never word anything as "fraud". `assessClaim` (claims.server.ts) is shared
+  by the claims page and staff-created claims — keep it the only place.
+- **Repeat address** uses `Claim.addressHash`: HMAC (app secret) of
+  street/zip/country, never the address. Reading the address needs protected
+  customer data (address); without it the query fails quietly → null → the
+  check is skipped.
+- **Limits** (`limitProblem`) block online filing only; staff can still
+  create the claim (`/app/claims/new`), which then needs a note and gets
+  OUTSIDE_POLICY. Window can start at delivery (`windowFrom`); undelivered
+  packages keep it open up to FOLLOW_DAYS.
+
+## Claims page languages + rate limits (added 2026-10-17)
+
+- `app/lib/i18n.ts`: en, de, fr, es, it, nl, hi — page, refusal reasons,
+  upload script messages (passed as `data-sp-text`), customer emails and the
+  customer-visible resolution notes. A test checks every language has every
+  key with the same `{placeholders}`. Admin/merchant text stays English.
+- Claim rules return **refusal codes** (`Refusal`), not sentences;
+  `refusalText(r, lang)` renders them (English `reason` kept for the admin).
+- Language: `?lang` → form `lang` field → Accept-Language → en. On a GET
+  without `?lang`, a tiny script with the page's only Liquid tag
+  (`{{ request.locale.iso_code }}`) reloads with the storefront's language.
+  `Claim.locale` = language it was filed in (staff claims: the order's
+  `customerLocale`); status links carry `&lang=`.
+- Lookup rate limits: Postgres fixed windows (`rate-limit.server.ts`), per
+  order number (8/15 min), per shopper IP from X-Forwarded-For if present
+  (20), per shop (600).
+
+## Billing (added 2026-10-17)
+
+- One usage plan (`app/lib/plan.ts` — the only place prices live): first 50
+  protected orders per 30-day cycle free, then $0.05, cap $299 (the
+  subscription's `cappedAmount`). Billing API, so **Managed Pricing must be
+  off** in the Partner Dashboard.
+- `app.tsx` loader: no active plan → redirect to `/app/plan` (the only page
+  open without one). `Shop.billingTest` (dev store or `BILLING_TEST=true`,
+  set in afterAuth) drives `isTest`.
+- `orders/create` → `billProtectedOrder`: one `UsageCharge` row per order
+  (FREE / CHARGED / CAPPED / NO_PLAN / FAILED); the free allowance is counted
+  under a per-shop `pg_advisory_xact_lock`. Usage records use the **raw**
+  `appUsageRecordCreate` with `idempotencyKey: sp-order-<id>` — the library's
+  `createUsageRecord` silently drops the key. FAILED rows retry on the next
+  webhook delivery; billing never fails the webhook.
+
+## Market prices, exact pricing, checkout toggle (added 2026-10-17)
+
+- **Market prices** (`Settings.marketPrices`, `markets.server.ts`): one
+  extra variant per distinct price, option value `"2.99 EUR"`, base price =
+  the amount; the market's catalog price list fixes it
+  (`priceListFixedPricesAdd`, needs only write_products). Listing markets
+  needs optional `read_markets`. A market whose catalog has no price list
+  gets one (0% adjustment); a market with **no catalog** is an error telling
+  the merchant to set up its pricing — we don't create catalogs (that would
+  change what the market sells). `ProtectionConfig.markets` carries the
+  countries; `marketFor(cfg, country)` is the one rule: in a market, `quote`
+  returns its variant and `acceptedVariants` accepts only it. The functions
+  use `localization.country` (`localization.market` is deprecated).
+- **Exact pricing** (Plus/dev stores): `extensions/protection-transform`
+  `lineUpdate`s the protection line to `fee × presentmentCurrencyRate`.
+  Registered via `cartTransformCreate(functionHandle)` (optional
+  `write_cart_transforms`); its config is the same JSON in its own `$app`
+  metafields; `Shop.cartTransformId`. The widget still adds the ladder
+  variant, so the validation is unchanged; `cfg.exact` only changes the
+  displayed price.
+- **Checkout toggle** (`extensions/protection-checkout`, Preact, target
+  `purchase.checkout.block.render` — Plus only, merchant places it in the
+  checkout editor). Checkout can't read app-installation metafields, so
+  `setInstallationConfig` also writes the config as a `$app:shipping-protection`
+  **shop** metafield. Pure logic in `src/logic.ts` (tested); the rate comes
+  from a Storefront API `@inContext` price of the dearest ladder variant;
+  hidden when coverage uses tags or the rate is unknown.
+- `shared/pricing.ts` is copied into all three extensions
+  (`scripts/sync-shared.mjs`, `test/shared-copy.test.ts`).
+- The CLI build writes `extensions/protection-checkout/shopify.d.ts`; it's
+  git-ignored and excluded from the root tsconfig (its Preact JSX types
+  clash with the admin's Polaris types).
+
+## Staging (added 2026-10-17)
+
+`shopify.app.staging.toml` = app "SafeShip (staging)", placeholders
+`REPLACE_ME` until the app exists; proxy subpath `safeship-staging`. Host on
+the same Vercel project's Preview env (`staging` branch) with its own env
+vars and Neon branch — the user wants one Vercel project per app.
+
 ## Verified so far (2026-10-16)
 
 - 47 vitest tests (pricing, function logic, order parsing, embed
@@ -210,12 +320,23 @@ Phase 1 records a resolution but doesn't carry it out.
   Liquid `app.metafields` access, the Horizon `cart:update` redraw, and
   every non-Dawn theme.
 
+## Verified 2026-10-17 (local only)
+
+- 120 vitest tests + 8 DB tests (resolutions, billing incl. three concurrent
+  orders for the last free slot) on real Postgres (docker `safeship-db`).
+- `shopify app build`: all five extensions build; the transform wasm run on a
+  sample cart returns the exact fee in presentment currency.
+- Admin GraphQL shapes for markets, price lists, catalogs, cart transforms
+  and usage records validated against the 2026-10 direct proxy (schema only —
+  access was denied there, so no data).
+- **Not run on a real store:** fulfillment webhooks, the cron job, billing
+  approval/usage records, market price lists, the cart transform, the
+  checkout block, the language switch's `request.locale` in proxy Liquid, and
+  whether Shopify forwards X-Forwarded-For / Accept-Language through the proxy.
+
 ## Open / next
 
-- Billing (Managed Pricing or usage) — not built; decide plans.
-- Plus stores: optional Cart Transform `lineUpdate` for exact % pricing.
-- Excluded products (not counted in the subtotal), per-market fixed prices,
-  checkout UI extension toggle (Plus-only steps).
-- Claims phases 3–4 (tracking and risk; analytics and A/B testing). Also: a translated claims
-  page, cleanup of orphan uploads, and lookup rate limiting.
-- Staging app + `shopify.app.staging.toml` before launch.
+- Claims phase 4: A/B testing, widget impressions/opt-in analytics, charts.
+- Create the staging app and fill `shopify.app.staging.toml`.
+- Excluded products: done via coverage EXCEPT (excluded lines are left out of
+  the fee subtotal) — nothing separate to build.

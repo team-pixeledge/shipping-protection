@@ -1,0 +1,98 @@
+# STAGING app config — a separate Shopify app ("SafeShip (staging)") with
+# its own client_id, URL and database, so changes can be tried on a dev
+# store before they reach merchants. Never reuse the production client_id.
+#
+# Before first use (see README → "Staging"):
+#   1. Dev Dashboard: create the app "SafeShip (staging)"; put its client ID
+#      below (replace every REPLACE_ME).
+#   2. Hosting: the Vercel project's Preview environment on the `staging`
+#      branch, with its own env vars (SHOPIFY_API_KEY/SECRET of this app,
+#      SHOPIFY_APP_URL, SCOPES, CRON_SECRET, BILLING_TEST=true) and its own
+#      database (a Neon branch) — never the production DATABASE_URL.
+#   3. `npm run config:use -- shopify.app.staging.toml` (or pass
+#      `--config staging`) before dev/deploy, and switch back afterwards.
+#
+# Keep scopes, optional scopes, webhooks and the proxy in step with
+# shopify.app.toml — only names, IDs and URLs differ.
+
+name = "SafeShip (staging)"
+client_id = "REPLACE_ME_STAGING_CLIENT_ID"
+application_url = "https://REPLACE_ME-staging.vercel.app"
+embedded = true
+
+[build]
+# Must stay false: true lets `shopify app dev` replace the production
+# application_url with a throwaway tunnel while a dev session runs.
+automatically_update_urls_on_dev = false
+
+[access_scopes]
+# write_products: create the hidden protection product and its price
+#   variants (read_products comes with it).
+# read_publications + write_publications: publish that product to the
+#   Online Store, or /cart/add.js can't add it.
+# read_orders + write_orders: orders/create webhook; write the
+#   shipping_protection.details metafield and the tag on each order.
+#   Protected customer data: request Level 1 in the Partner Dashboard (we
+#   read no name/email/phone/address fields, store none).
+# read_fulfillments: fulfillments/* and fulfillment_events/create webhooks —
+#   shipment tracking for protected orders (Shipments page, claim flags).
+# read_themes: Home checks whether the app embed is on in the live theme.
+# write_validations: create/update the checkout rule (validationCreate).
+scopes = "write_products,read_publications,write_publications,read_orders,write_orders,read_fulfillments,read_themes,write_validations"
+# Optional — asked for only when a merchant first uses the feature (App
+# Bridge shopify.scopes.request on the claim page), so they're NOT in the
+# SCOPES env var:
+# write_draft_orders: free replacement orders for approved claims.
+# write_store_credit_account_transactions: store credit for approved claims.
+# read_markets: Settings → Prices by market (list markets, their currencies
+#   and price lists; the fixed prices themselves need only write_products).
+# write_cart_transforms: Settings → Exact pricing (Plus): the
+#   protection-transform cart transform.
+optional_scopes = [
+  "write_draft_orders",
+  "write_store_credit_account_transactions",
+  "read_markets",
+  "write_cart_transforms",
+]
+
+[auth]
+redirect_urls = ["https://REPLACE_ME-staging.vercel.app/auth/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  topics = ["app/scopes_update"]
+  uri = "/webhooks/app/scopes_update"
+
+  [[webhooks.subscriptions]]
+  topics = ["orders/create"]
+  uri = "/webhooks/orders/create"
+
+  # Shipment tracking (app/routes/webhooks.fulfillments.tsx).
+  [[webhooks.subscriptions]]
+  topics = ["fulfillments/create", "fulfillments/update", "fulfillment_events/create"]
+  uri = "/webhooks/fulfillments"
+
+  # Mandatory for public apps.
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "/webhooks/compliance"
+
+# Storefront claims page: https://<store>/apps/safeship/claims →
+# https://REPLACE_ME-staging.vercel.app/proxy/claims (app/routes/proxy.*).
+# Changing url or subpath later doesn't reach stores that already have the
+# app installed — they must uninstall and reinstall. Merchants can rename
+# the subpath themselves; the app learns it from each request (path_prefix).
+[app_proxy]
+url = "https://REPLACE_ME-staging.vercel.app/proxy"
+# Its own subpath, so both apps can sit on one dev store.
+subpath = "safeship-staging"
+prefix = "apps"
+
+[pos]
+embedded = false

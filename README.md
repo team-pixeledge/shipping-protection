@@ -32,6 +32,24 @@ the cart, on every Shopify plan.
 - **Program results:** on Home, fees collected against claim costs (net and
   loss ratio) for 30 days, 90 days, 12 months or all time, plus a CSV export
   of claims.
+- **Shipment tracking (phase 3):** every package of a protected or claimed
+  order on a Shipments page, with flags for "not picked up", "stalled",
+  "late" and "possibly lost" (thresholds in Settings → Tracking). Merchants
+  can create a claim for any order from there.
+- **Claim risk signals (phase 3):** repeat claims from a customer or a
+  shipping address, the same tracking number on another order's claim, high
+  value, "lost" while the carrier still shows movement — plus carrier data
+  that supports the claim. Shown as a review priority; flags can be
+  dismissed with a note. Limits per order and per customer, a claim window
+  from shipping or delivery, and required evidence for lost/stolen claims.
+- **Seven languages** on the claims page and in customer emails (en, de, fr,
+  es, it, nl, hi). Order lookups are rate-limited.
+- **Prices by market:** a fixed fee in a market's own currency (e.g. €2.99
+  in Europe), set in that market's price list.
+- **Shopify Plus:** exact percentage fees (a cart transform) and a
+  protection toggle inside checkout (a checkout UI block).
+- **Billing:** one usage plan — first 50 protected orders per 30-day cycle
+  free, then $0.05 each, capped at $299 — with a Plan & pricing page and FAQ.
 
 ## How it works
 
@@ -65,6 +83,15 @@ widget adds whichever variant matches the fee.
 | `portal/claims-portal.ts` | Claims page script (uploads), bundled into `public/claims-portal.js` |
 | `app/routes/app.claims*` | Admin: claims list and review page |
 | `app/routes/claim-files.$id.tsx` | Evidence files, through short-lived signed links |
+| `app/lib/tracking.ts` / `tracking.server.ts` | Package stages and flags / sync from Shopify fulfillments |
+| `app/routes/app.shipments._index.tsx` | Admin: Shipments page |
+| `app/routes/app.claims.new.tsx` | Admin: staff-created claims |
+| `app/lib/daily.server.ts` + `app/routes/api.cron.daily.tsx` | Daily job (Vercel Cron): tracking, orphan uploads, rate-limit rows |
+| `app/lib/i18n.ts` | Claims page and customer email translations |
+| `app/lib/plan.ts` / `billing.server.ts` / `app/routes/app.plan.tsx` | The plan, usage charges, Plan & pricing page |
+| `app/lib/markets.server.ts` | Prices by market (price lists) |
+| `extensions/protection-transform/` + `app/lib/cart-transform.server.ts` | Exact pricing cart transform (Plus) |
+| `extensions/protection-checkout/` | Checkout toggle (Plus), Preact checkout UI extension |
 
 ### Claims
 
@@ -122,28 +149,57 @@ Admin → Claims ─────────────────────
      when it's connected. The production store `safeship-claims` already
      exists. Without the token, uploads are hidden.
 
+7. For tracking: the app needs `read_fulfillments` (in `scopes`), and the
+   daily job needs `CRON_SECRET` set on Vercel (Vercel Cron sends it).
+8. For billing: in the Partner Dashboard, keep **Managed Pricing off** (the
+   app uses the Billing API). Dev stores get test charges automatically;
+   `BILLING_TEST=true` forces test charges anywhere (staging).
+
 `npm run dev` and `npm run deploy` first run `prepare:extensions`, which copies
-`shared/pricing.ts` into the function and bundles the widget. Never run a bare
+`shared/pricing.ts` into the three extensions that use it (validation,
+transform, checkout) and bundles the widget. Never run a bare
 `shopify app deploy`.
 
 ## Deploy
 
 - **Vercel:** add the Neon integration (it sets `DATABASE_URL` and
   `DATABASE_URL_UNPOOLED`), plus `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`,
-  `SHOPIFY_APP_URL` and `SCOPES`. Builds use `npm run vercel-build`, which runs
-  the migrations.
+  `SHOPIFY_APP_URL`, `SCOPES` (must match `scopes` in the toml — now
+  including `read_fulfillments`) and `CRON_SECRET`. Builds use
+  `npm run vercel-build`, which runs the migrations. `vercel.json` schedules
+  `/api/cron/daily` at 06:00 UTC.
 - **AWS (later):** the `Dockerfile` builds a plain Node server
   (`npm run docker-start`). Point both database URLs at RDS.
 - **Extensions and app config:** `npm run deploy`. This also registers the
   app proxy. A store that installed the app before the proxy existed must
   **uninstall and reinstall** the app to get it.
 
+## Staging
+
+`shopify.app.staging.toml` is a second app, **SafeShip (staging)**, for
+trying changes on a dev store before merchants get them. It needs:
+
+1. A new app in the Dev Dashboard; put its client ID and URL in place of
+   every `REPLACE_ME` in `shopify.app.staging.toml`.
+2. Hosting: the same Vercel project's **Preview** environment for a
+   `staging` branch (one Vercel project per app — don't create another), with
+   a stable branch domain and its own env vars: this app's
+   `SHOPIFY_API_KEY`/`SHOPIFY_API_SECRET`, `SHOPIFY_APP_URL`, `SCOPES`,
+   `CRON_SECRET`, `BILLING_TEST=true`, and a separate database (a Neon
+   branch). Never point staging at the production `DATABASE_URL`.
+3. Deploy its config and extensions with
+   `npm run prepare:extensions && npx shopify app deploy --config staging`.
+
+The proxy subpath is `safeship-staging`, so both apps can sit on one dev
+store.
+
 ## Status (2026-10-16)
 
 - App **SafeShip: Shipping Protection** is linked in `shopify.app.toml` and
   hosted at https://safeship-app.vercel.app (Neon database).
 - Version `safeship-shipping-protection-3` is released (extensions + config).
-- There is only a production app so far. There is no staging app yet.
+- A staging config exists (`shopify.app.staging.toml`) but the staging app
+  itself hasn't been created yet.
 - It has not been tested on a real store yet. See the unverified list in
   `CLAUDE.md`.
 
@@ -211,23 +267,23 @@ locally (`react-router-serve`, Prisma), point `DATABASE_URL` and
 ## Checks
 
 ```bash
-npm test              # 89 tests (+5 database tests, skipped without TEST_DATABASE_URL)
-TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:55451/shipping_protection npx vitest run test/resolutions.db.test.ts
+npm test              # 120 tests (+8 database tests, skipped without TEST_DATABASE_URL)
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:55451/shipping_protection npx vitest run test/*.db.test.ts
 npm run typecheck
 npm run lint
-cd extensions/protection-validation && npx shopify app function build
+npx shopify app build --skip-dependencies-installation   # all extensions
 ```
 
 ## Limitations
 
-- **Percentage fees snap to the nearest price point.** With the default floor
-  and cap that's about ±1.5%. A Plus-only Cart Transform could give exact
-  prices; it isn't built.
+- **Percentage fees snap to the nearest price point** (about ±1.5%) except
+  on Plus stores with exact pricing on.
 - **Express checkout skips the cart.** "Buy it now", Shop Pay, Apple Pay and
   Google Pay on product pages bypass the widget, so those orders have no
   protection.
-- **There's no toggle inside checkout.** Checkout UI extensions on the
-  information, shipping and payment steps are Plus-only.
+- **The checkout toggle is Plus-only** (Shopify's rule for checkout blocks),
+  and it hides itself when coverage uses tags or the exchange rate can't be
+  read.
 - **Theme coverage varies.** Dawn-family and Horizon redraw in place. Maestrooo
   and Archetype themes get their refresh events. Other themes may need the
   custom refresh event, the cart block, or a reload on the cart page. Some
@@ -246,7 +302,8 @@ cd extensions/protection-validation && npx shopify app function build
   the widget read `/products/<handle>.js` once per product per session.
   Coverage changes take effect for new carts; claims follow the current
   rules.
-- **Claims page is English only.** The emails are English too.
+- **Seven languages only** on the claims page and in emails; others get
+  English. The merchant's own policy text isn't translated.
 - **Order lookup sees only the last 60 days of orders.** Older orders need the
   `read_all_orders` scope, which Shopify approves separately.
 - **Program results aren't profit.** Payment fees, app charges and tax on
@@ -256,10 +313,10 @@ cd extensions/protection-validation && npx shopify app function build
   outside the app" to record its cost.
 - **A replacement order ships to the original address.** To change it, edit
   the new order in Shopify.
-- **No rate limit on order lookups.** Guessing needs both the order number
-  and its email.
-- **Uploads that are never submitted stay in Blob storage.** They're deleted
-  on customer or shop redaction, but there's no other cleanup yet.
-- **Not built yet:** billing, per-market fixed prices, tracking sync and
-  fraud rules (phase 3), and A/B tests, widget analytics and charts
-  (phase 4).
+- **Tracking depends on the carrier reporting to Shopify.** Without carrier
+  events, only "not picked up" and "possibly lost" can be worked out.
+  Delivery scans alone never decide a claim.
+- **Repeat-address checks need the address field** (protected customer data).
+  Without it, they're skipped.
+- **Usage charges count orders when placed;** cancellations aren't refunded.
+- **Not built yet:** A/B tests, widget analytics and charts (phase 4).
