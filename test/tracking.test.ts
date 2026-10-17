@@ -107,3 +107,84 @@ describe("housekeeping helpers", () => {
     expect(claimLocale("NL")).toBe("nl");
   });
 });
+
+describe("translations", async () => {
+  const { DICTS, LOCALES, fill, fromAcceptLanguage } = await import("../app/lib/i18n");
+  const { lookupPage, statusPage, claimFormPage } = await import("../app/lib/portal-pages");
+  const placeholders = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(",");
+  const flat = (o: unknown, prefix = ""): [string, string][] =>
+    Object.entries(o as Record<string, unknown>).flatMap(([k, v]) =>
+      typeof v === "string" ? [[prefix + k, v] as [string, string]] : flat(v, `${prefix}${k}.`),
+    );
+  const en = new Map(flat(DICTS.en));
+
+  test("every language has every string, with the same placeholders", () => {
+    for (const l of LOCALES) {
+      const strings = new Map(flat(DICTS[l]));
+      expect([...strings.keys()].sort(), l).toEqual([...en.keys()].sort());
+      for (const [k, v] of strings) {
+        expect(v.trim(), `${l}.${k}`).not.toBe("");
+        expect(placeholders(v), `${l}.${k}`).toBe(placeholders(en.get(k)!));
+      }
+    }
+  });
+
+  test("fill and Accept-Language", () => {
+    expect(fill("Order {order} · {x}", { order: "#1" })).toBe("Order #1 · {x}");
+    expect(fromAcceptLanguage("pt-BR,de;q=0.8,en;q=0.5")).toBe("de");
+    expect(fromAcceptLanguage("en-GB,de")).toBe("en");
+    expect(fromAcceptLanguage("pt-BR")).toBeNull();
+    expect(fromAcceptLanguage(null)).toBeNull();
+  });
+
+  test("pages render in the chosen language and stay Liquid-safe", () => {
+    const opts = { prefix: "/apps/safeship", appUrl: "https://app.example" };
+    for (const lang of LOCALES) {
+      const html =
+        lookupPage({ ...opts, lang, policy: "{{ x }}", signedIn: false }) +
+        claimFormPage({
+          ...opts,
+          lang,
+          orderName: "#1",
+          email: "a@b.c",
+          token: "t",
+          lines: [],
+          currency: "EUR",
+          uploads: true,
+          photosForDamage: true,
+          evidenceForAll: true,
+          uploadPrefix: "claims/x/1/",
+        }) +
+        statusPage({
+          ...opts,
+          lang,
+          number: 1001,
+          orderName: "#1",
+          type: "LOST",
+          status: "APPROVED",
+          resolution: "REFUND",
+          items: [],
+          amount: 5,
+          currency: "EUR",
+          createdAt: new Date().toISOString(),
+          events: [{ at: new Date().toISOString(), actor: "MERCHANT", kind: "SUBMITTED", status: null, message: null }],
+          token: "t",
+          claimId: "c",
+          uploads: false,
+          uploadPrefix: "",
+        });
+      expect(html).toContain(DICTS[lang].lookupTitle.replace(/'/g, "&#39;"));
+      expect(html).toContain(`name="lang" value="${lang}"`);
+      expect(html, lang).not.toMatch(/\{\{|\{%/);
+    }
+  });
+
+  test("only the detect script carries Liquid, and only when asked", () => {
+    const opts = { prefix: "/apps/safeship", appUrl: "https://app.example", lang: "en" as const };
+    expect(lookupPage({ ...opts, policy: "", signedIn: false })).not.toContain("request.locale");
+    const html = lookupPage({ ...opts, detectLang: true, policy: "", signedIn: false });
+    expect(html.match(/\{\{/g)).toHaveLength(1);
+    expect(html).toContain("{{ request.locale.iso_code }}");
+    expect(html).not.toContain("{%");
+  });
+});

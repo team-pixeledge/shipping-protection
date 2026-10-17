@@ -8,6 +8,7 @@ import {
   type TrackingNumber,
   type TrackingSettings,
 } from "./tracking";
+import { refusalText, type Refusal } from "./i18n";
 
 // Claims: the rules, with no I/O. Shared by the storefront claims page
 // (app/routes/proxy.*), the admin (app/routes/app.claims*) and the settings
@@ -271,7 +272,12 @@ const daysBetween = (from: string, to: Date) => (to.getTime() - new Date(from).g
 
 export type Eligibility =
   | { ok: true }
-  | { ok: false; reason: string; openClaimId?: string };
+  | { ok: false; refusal: Refusal; /** English, for the admin. */ reason: string; openClaimId?: string };
+
+const refuse = (code: Refusal["code"], vars?: Refusal["vars"], openClaimId?: string): Eligibility => {
+  const refusal: Refusal = { code, ...(vars ? { vars } : {}) };
+  return { ok: false, refusal, reason: refusalText(refusal), ...(openClaimId ? { openClaimId } : {}) };
+};
 
 export interface PriorClaim {
   id: string;
@@ -284,26 +290,16 @@ export function orderEligibility(
   opts: { settings: ClaimSettings; isProtected: boolean; prior: PriorClaim[]; now: Date },
 ): Eligibility {
   const { settings, isProtected, prior, now } = opts;
-  if (order.cancelled) return { ok: false, reason: "This order was cancelled, so it can't be claimed." };
-  if (settings.requireProtection && !isProtected) {
-    return { ok: false, reason: "This order didn't include shipping protection, so it can't be claimed here." };
-  }
+  if (order.cancelled) return refuse("CANCELLED");
+  if (settings.requireProtection && !isProtected) return refuse("NO_PROTECTION");
   const open = prior.find((c) => OPEN_STATUSES.includes(c.status as ClaimStatus));
-  if (open) return { ok: false, reason: "There's already an open claim for this order.", openClaimId: open.id };
+  if (open) return refuse("OPEN_CLAIM", undefined, open.id);
   const counted = prior.filter((c) => c.status !== "REJECTED").length;
-  if (counted >= settings.maxPerOrder) {
-    return { ok: false, reason: "This order has already been claimed. Please contact the store." };
-  }
-  if (!order.shipments.length) {
-    return { ok: false, reason: "This order hasn't shipped yet. You can file a claim once it's on its way." };
-  }
+  if (counted >= settings.maxPerOrder) return refuse("ALREADY_CLAIMED");
+  if (!order.shipments.length) return refuse("NOT_SHIPPED");
   const start = windowStart(order, settings, now);
   if (daysBetween(start, now) > settings.windowDays) {
-    const from = settings.windowFrom === "DELIVERED" ? "delivery" : "shipping";
-    return {
-      ok: false,
-      reason: `Claims must be filed within ${settings.windowDays} days of ${from}. Please contact the store.`,
-    };
+    return refuse(settings.windowFrom === "DELIVERED" ? "WINDOW_DELIVERED" : "WINDOW_SHIPPED", { days: settings.windowDays });
   }
   return { ok: true };
 }
@@ -324,16 +320,14 @@ export function windowStart(order: ClaimOrder, settings: ClaimSettings, now: Dat
 }
 
 /** Type-specific check: lost packages may need some days in transit first. */
-export function typeProblem(order: ClaimOrder, type: ClaimType, settings: ClaimSettings, now: Date): string | null {
+export function typeProblem(order: ClaimOrder, type: ClaimType, settings: ClaimSettings, now: Date): Refusal | null {
   if (type !== "LOST" || settings.lostAfterDays <= 0) return null;
   if (order.shipments.some((s) => s.deliveredAt)) return null;
   const firstShipped = order.shipments.map((s) => s.shippedAt).sort()[0];
   if (!firstShipped) return null;
   const from = new Date(new Date(firstShipped).getTime() + settings.lostAfterDays * DAY);
   if (from > now) {
-    return `Packages can be reported lost ${settings.lostAfterDays} days after shipping — from ${from
-      .toISOString()
-      .slice(0, 10)}. It may still be on its way.`;
+    return { code: "LOST_TOO_EARLY", vars: { days: settings.lostAfterDays, date: from.toISOString().slice(0, 10) } };
   }
   return null;
 }
@@ -423,12 +417,12 @@ export function limitProblem(
   claimedOnOrder: number,
   claimedByCustomer: number,
   settings: ClaimSettings,
-): string | null {
+): Refusal | null {
   if (settings.maxValuePerOrder > 0 && claimedOnOrder + amount > settings.maxValuePerOrder + 0.005) {
-    return "This claim is more than can be claimed online for one order. Please contact the store.";
+    return { code: "OVER_ORDER_LIMIT" };
   }
   if (settings.maxValuePerCustomer > 0 && claimedByCustomer + amount > settings.maxValuePerCustomer + 0.005) {
-    return "This claim is more than can be claimed online. Please contact the store.";
+    return { code: "OVER_CUSTOMER_LIMIT" };
   }
   return null;
 }

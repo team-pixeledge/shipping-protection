@@ -23,6 +23,7 @@ import {
 import { signToken, tokenShop, verifyToken } from "../app/lib/claim-token.server";
 import { DEFAULT_COVERAGE } from "../shared/pricing";
 import { DEFAULT_TRACKING_SETTINGS } from "../app/lib/tracking";
+import { refusalText } from "../app/lib/i18n";
 import { toClaimOrder } from "../app/lib/claims.server";
 import { claimFormPage, esc, lookupPage, statusPage } from "../app/lib/portal-pages";
 
@@ -133,7 +134,9 @@ describe("orderEligibility", () => {
 describe("typeProblem", () => {
   const wait = { ...settings, lostAfterDays: 14 };
   test("lost needs the waiting period unless delivered", () => {
-    expect(typeProblem(order(), "LOST", wait, now)).toMatch(/14 days after shipping/);
+    expect(typeProblem(order(), "LOST", wait, now)).toMatchObject({ code: "LOST_TOO_EARLY", vars: { days: 14 } });
+    expect(refusalText(typeProblem(order(), "LOST", wait, now)!)).toMatch(/14 days after shipping/);
+    expect(refusalText(typeProblem(order(), "LOST", wait, now)!, "de")).toMatch(/14 Tage nach dem Versand/);
     expect(typeProblem(order(), "DAMAGED", wait, now)).toBeNull();
     expect(typeProblem(order(), "LOST", settings, now)).toBeNull();
     const delivered = order({ shipments: [{ ...order().shipments[0], deliveredAt: daysAgo(1) }] });
@@ -217,8 +220,8 @@ describe("claim limits and window", () => {
     expect(limitProblem(500, 0, 0, settings)).toBeNull();
     const limited = { ...settings, maxValuePerOrder: 100, maxValuePerCustomer: 300 };
     expect(limitProblem(100, 0, 0, limited)).toBeNull();
-    expect(limitProblem(60, 50, 0, limited)).toMatch(/one order/);
-    expect(limitProblem(60, 0, 250, limited)).toMatch(/more than can be claimed/);
+    expect(limitProblem(60, 50, 0, limited)).toEqual({ code: "OVER_ORDER_LIMIT" });
+    expect(limitProblem(60, 0, 250, limited)).toEqual({ code: "OVER_CUSTOMER_LIMIT" });
   });
 
   test("window from delivery", () => {

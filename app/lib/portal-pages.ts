@@ -2,13 +2,11 @@
 // as Liquid inside the store's theme, so every dynamic value goes through
 // esc(), which also neutralises { and } — otherwise a customer could type
 // "{{ shop.metafields… }}" into a description and have the store render it.
+// Text comes from ./i18n.ts in the page's language (PageOptions.lang).
 // Pure: no I/O, so it's unit-tested (test/claims.test.ts).
 import {
   CLAIM_TYPES,
   formatClaimNumber,
-  RESOLUTION_LABELS,
-  STATUS_LABELS,
-  TYPE_LABELS,
   UPLOAD_TYPES,
   type ClaimItem,
   type ClaimStatus,
@@ -16,6 +14,7 @@ import {
   type OrderLine,
   type Resolution,
 } from "./claims";
+import { DICTS, fill, formatDate, formatMoney, LOCALES, type Locale } from "./i18n";
 
 export const esc = (v: unknown) =>
   String(v ?? "").replace(
@@ -31,16 +30,7 @@ const paras = (s: string) =>
     .map((p) => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`)
     .join("");
 
-export const money = (amount: number, currency: string) => {
-  try {
-    return new Intl.NumberFormat("en", { style: "currency", currency }).format(amount);
-  } catch {
-    return `${currency} ${amount.toFixed(2)}`;
-  }
-};
-
-const date = (iso: string | Date) =>
-  new Date(iso).toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" });
+export const money = (amount: number, currency: string, lang: Locale = "en") => formatMoney(amount, currency, lang);
 
 // Single braces only in CSS: "{{" would be Liquid.
 const STYLE = `<style>
@@ -78,51 +68,87 @@ export interface PageOptions {
   /** e.g. "/apps/safeship" — forms post back through the proxy. */
   prefix: string;
   appUrl: string;
+  /** The page's language. */
+  lang?: Locale;
+  /**
+   * The language wasn't chosen explicitly (no ?lang, no form field): let the
+   * storefront's own language, which only Liquid knows, switch the page.
+   */
+  detectLang?: boolean;
   /** Replace the address bar (after a POST) so a refresh doesn't resubmit. */
   replaceUrl?: string;
 }
 
+const L = (o: PageOptions) => DICTS[o.lang ?? "en"];
+
+/** Hidden field that keeps the language across form posts. */
+const langField = (o: PageOptions) => `<input type="hidden" name="lang" value="${esc(o.lang ?? "en")}">`;
+
+// Liquid fills in the storefront's language; if it's one we have and the
+// page isn't in it, reload with ?lang=. Single braces only, apart from the
+// one Liquid output tag.
+const detectScript = (o: PageOptions) =>
+  `<script>(function(){var l=("{{ request.locale.iso_code }}"||"").toLowerCase().split("-")[0];var have=${JSON.stringify(
+    LOCALES,
+  )};var u=new URL(location.href);if(l&&l!=="${o.lang ?? "en"}"&&have.indexOf(l)>=0&&!u.searchParams.get("lang"))` +
+  `{u.searchParams.set("lang",l);location.replace(u.toString())}})();</script>`;
+
+/** Strings the upload script shows, in the page's language. */
+const uploadText = (o: PageOptions) => {
+  const t = L(o);
+  return JSON.stringify({
+    tooMany: t.upTooMany,
+    tooLarge: t.upTooLarge,
+    uploading: t.upUploading,
+    failed: t.upFailed,
+    remove: t.upRemove,
+  });
+};
+
 function page(o: PageOptions, body: string) {
   const replace = o.replaceUrl ? ` data-sp-replace-url="${esc(o.replaceUrl)}"` : "";
-  return `${STYLE}<div class="sp-claims"${replace}>${body}</div>
-<script src="${esc(o.appUrl)}/claims-portal.js" defer></script>`;
+  return `${STYLE}<div class="sp-claims" lang="${esc(o.lang ?? "en")}" data-sp-text="${esc(uploadText(o))}"${replace}>${body}</div>
+${o.detectLang ? detectScript(o) : ""}<script src="${esc(o.appUrl)}/claims-portal.js" defer></script>`;
 }
 
 const notice = (n?: { error?: string; ok?: string }) =>
   (n?.error ? `<div class="sp-error" role="alert">${esc(n.error)}</div>` : "") +
   (n?.ok ? `<div class="sp-ok" role="status">${esc(n.ok)}</div>` : "");
 
-export function unavailablePage(o: PageOptions, why = "Claims can't be filed online for this store. Please contact the store.") {
-  return page(o, `<h1>Shipping protection claims</h1><p>${esc(why)}</p>`);
+export function unavailablePage(o: PageOptions, why?: string) {
+  return page(o, `<h1>${esc(L(o).pageTitle)}</h1><p>${esc(why ?? L(o).unavailable)}</p>`);
 }
 
 export function lookupPage(
   o: PageOptions & { policy: string; signedIn: boolean; error?: string; orderName?: string; email?: string },
 ) {
+  const t = L(o);
   return page(
     o,
-    `<h1>File a shipping protection claim</h1>
-<p>If your package was lost, stolen or arrived damaged, tell us here. First, find your order.</p>
+    `<h1>${esc(t.lookupTitle)}</h1>
+<p>${esc(t.lookupIntro)}</p>
 ${o.policy ? `<div class="sp-note">${paras(o.policy)}</div>` : ""}
 ${notice({ error: o.error })}
 <form method="post" action="${esc(o.prefix)}/claims">
   <input type="hidden" name="intent" value="lookup">
-  <label>Order number <input type="text" name="order" required maxlength="40" autocomplete="off" placeholder="#1001" value="${esc(o.orderName)}"></label>
-  <label>Email used for the order ${o.signedIn ? '<span class="sp-muted">(optional — you\'re signed in)</span>' : ""}
+  ${langField(o)}
+  <label>${esc(t.orderNumber)} <input type="text" name="order" required maxlength="40" autocomplete="off" placeholder="#1001" value="${esc(o.orderName)}"></label>
+  <label>${esc(t.orderEmail)} ${o.signedIn ? `<span class="sp-muted">${esc(t.signedInOptional)}</span>` : ""}
     <input type="email" name="email" ${o.signedIn ? "" : "required"} maxlength="254" autocomplete="email" value="${esc(o.email)}"></label>
-  <button type="submit">Find my order</button>
+  <button type="submit">${esc(t.findOrder)}</button>
 </form>
-<p class="sp-muted">Already filed a claim? Use the link in your confirmation email to see its status.</p>`,
+<p class="sp-muted">${esc(t.alreadyFiled)}</p>`,
   );
 }
 
 export function ineligiblePage(o: PageOptions & { orderName: string; reason: string; openClaimUrl?: string }) {
+  const t = L(o);
   return page(
     o,
-    `<h1>Order ${esc(o.orderName)}</h1>
+    `<h1>${esc(fill(t.orderHeading, { order: o.orderName }))}</h1>
 <div class="sp-error" role="alert">${esc(o.reason)}</div>
-${o.openClaimUrl ? `<p><a href="${esc(o.openClaimUrl)}">View the open claim</a></p>` : ""}
-<p><a href="${esc(o.prefix)}/claims">Look up another order</a></p>`,
+${o.openClaimUrl ? `<p><a href="${esc(o.openClaimUrl)}">${esc(t.viewOpenClaim)}</a></p>` : ""}
+<p><a href="${esc(o.prefix)}/claims?lang=${esc(o.lang ?? "en")}">${esc(t.lookupAnother)}</a></p>`,
   );
 }
 
@@ -135,15 +161,18 @@ export function claimFormPage(
     currency: string;
     uploads: boolean;
     photosForDamage: boolean;
+    /** Lost and stolen claims need a document too. */
+    evidenceForAll?: boolean;
     uploadPrefix: string;
     error?: string;
     values?: { type?: string; description?: string; picked?: Record<string, number> };
   },
 ) {
+  const t = L(o);
   const v = o.values ?? {};
   const types = CLAIM_TYPES.map(
-    (t) => `<label class="sp-choice"><input type="radio" name="type" value="${t}" required ${v.type === t ? "checked" : ""}>
-  <span>${esc(TYPE_LABELS[t])}<br><span class="sp-muted">${esc(TYPE_HELP[t])}</span></span></label>`,
+    (k) => `<label class="sp-choice"><input type="radio" name="type" value="${k}" required ${v.type === k ? "checked" : ""}>
+  <span>${esc(t.types[k])}<br><span class="sp-muted">${esc(t.typeHelp[k])}</span></span></label>`,
   ).join("");
   const items = o.lines
     .map((l) => {
@@ -152,43 +181,40 @@ export function claimFormPage(
       const qtys = Array.from({ length: l.quantity }, (_, i) => i + 1)
         .map((q) => `<option value="${q}" ${q === (picked || l.quantity) ? "selected" : ""}>${q}</option>`)
         .join("");
+      const each = fill(t.each, { price: money(l.unitAmount, o.currency, o.lang) });
       return `<label class="sp-item"><input type="checkbox" name="line" value="${esc(id)}" ${picked ? "checked" : ""}>
   ${l.image ? `<img src="${esc(l.image)}" alt="">` : "<span></span>"}
-  <span>${esc(l.title)}${l.variantTitle ? `<br><span class="sp-muted">${esc(l.variantTitle)}</span>` : ""}<br><span class="sp-muted">${esc(money(l.unitAmount, o.currency))} each</span></span>
-  ${l.quantity > 1 ? `<select name="qty_${esc(id)}" aria-label="Quantity">${qtys}</select>` : `<input type="hidden" name="qty_${esc(id)}" value="1"><span></span>`}</label>`;
+  <span>${esc(l.title)}${l.variantTitle ? `<br><span class="sp-muted">${esc(l.variantTitle)}</span>` : ""}<br><span class="sp-muted">${esc(each)}</span></span>
+  ${l.quantity > 1 ? `<select name="qty_${esc(id)}" aria-label="${esc(t.quantity)}">${qtys}</select>` : `<input type="hidden" name="qty_${esc(id)}" value="1"><span></span>`}</label>`;
     })
     .join("");
+  const required = o.evidenceForAll ? t.uploadRequiredAll : o.photosForDamage ? t.uploadRequiredDamage : "";
   const upload = o.uploads
     ? `<div data-sp-upload data-token="${esc(o.token)}" data-prefix="${esc(o.uploadPrefix)}" data-endpoint="${esc(o.prefix)}/upload/">
-  <label>Photos or documents <span class="sp-muted">(${o.photosForDamage ? "required for damage claims; " : ""}JPG, PNG, HEIC or PDF, up to 10 MB each)</span>
+  <label>${esc(t.uploadLabel)} <span class="sp-muted">(${esc([required, t.uploadFormats].filter(Boolean).join("; "))})</span>
   <input type="file" multiple accept="${UPLOAD_TYPES.join(",")}"></label>
   <div class="sp-files" aria-live="polite"></div>
 </div>`
     : "";
   return page(
     o,
-    `<h1>Claim for order ${esc(o.orderName)}</h1>
+    `<h1>${esc(fill(t.claimFor, { order: o.orderName }))}</h1>
 ${notice({ error: o.error })}
 <form method="post" data-sp-claim-form action="${esc(o.prefix)}/claims">
   <input type="hidden" name="intent" value="submit">
   <input type="hidden" name="token" value="${esc(o.token)}">
-  <fieldset><legend>What happened?</legend>${types}</fieldset>
-  <fieldset><legend>Which items are affected?</legend>${items}</fieldset>
-  <label>Tell us what happened
+  ${langField(o)}
+  <fieldset><legend>${esc(t.whatHappened)}</legend>${types}</fieldset>
+  <fieldset><legend>${esc(t.whichItems)}</legend>${items}</fieldset>
+  <label>${esc(t.tellUs)}
     <textarea name="description" rows="5" required minlength="10" maxlength="3000">${esc(v.description)}</textarea></label>
   ${upload}
-  <p class="sp-muted">We'll send updates to ${esc(o.email)}.</p>
-  <label class="sp-choice"><input type="checkbox" name="confirm" required> <span>The information I've given is true and complete.</span></label>
-  <button type="submit">Submit claim</button>
+  <p class="sp-muted">${esc(fill(t.updatesTo, { email: o.email }))}</p>
+  <label class="sp-choice"><input type="checkbox" name="confirm" required> <span>${esc(t.confirmTrue)}</span></label>
+  <button type="submit">${esc(t.submit)}</button>
 </form>`,
   );
 }
-
-const TYPE_HELP: Record<ClaimType, string> = {
-  LOST: "The package never arrived and isn't marked delivered, or tracking stopped updating.",
-  STOLEN: "The package was marked delivered but you didn't receive it.",
-  DAMAGED: "The package arrived but items were broken or damaged. Please add photos.",
-};
 
 export interface PublicEvent {
   at: string;
@@ -218,53 +244,65 @@ export function statusPage(
     error?: string;
   },
 ) {
+  const t = L(o);
+  const lang = o.lang ?? "en";
   const open = o.status === "OPEN" || o.status === "NEEDS_INFO";
   const timeline = o.events
     .map((e) => {
-      const who = e.actor === "CUSTOMER" ? "You" : "The store";
+      const you = e.actor === "CUSTOMER";
       const what =
         e.kind === "SUBMITTED"
-          ? "Claim filed"
+          ? e.actor === "MERCHANT"
+            ? t.evStaffFiled
+            : t.evFiled
           : e.kind === "RESOLVED"
-            ? "Resolved"
-          : e.kind === "STATUS"
-            ? `Status: ${STATUS_LABELS[e.status as ClaimStatus] ?? e.status}`
-            : e.kind === "FILES"
-              ? `${who} added files`
-              : `${who} wrote`;
+            ? t.evResolved
+            : e.kind === "STATUS"
+              ? fill(t.evStatus, { status: t.statuses[e.status as ClaimStatus] ?? e.status ?? "" })
+              : e.kind === "FILES"
+                ? you
+                  ? t.evYouFiles
+                  : t.evStoreFiles
+                : you
+                  ? t.evYouWrote
+                  : t.evStoreWrote;
       const body = e.kind === "FILES" ? "" : e.message ? paras(e.message) : "";
-      return `<li><strong>${esc(what)}</strong> <span class="sp-muted">${esc(date(e.at))}</span>${body}</li>`;
+      return `<li><strong>${esc(what)}</strong> <span class="sp-muted">${esc(formatDate(e.at, lang))}</span>${body}</li>`;
     })
     .join("");
   const items = o.items
-    .map((i) => `<tr><td>${esc(i.title)} × ${esc(i.quantity)}</td><td style="text-align:right">${esc(money(i.amount, o.currency))}</td></tr>`)
+    .map(
+      (i) =>
+        `<tr><td>${esc(i.title)} × ${esc(i.quantity)}</td><td style="text-align:right">${esc(money(i.amount, o.currency, lang))}</td></tr>`,
+    )
     .join("");
   const reply = open
     ? `<form method="post" data-sp-claim-form action="${esc(o.prefix)}/claims/${esc(o.claimId)}?t=${encodeURIComponent(o.token)}">
   <input type="hidden" name="intent" value="reply">
   <input type="hidden" name="token" value="${esc(o.token)}">
-  <label>${o.status === "NEEDS_INFO" ? "Send the information requested" : "Add a message for the store"}
+  ${langField(o)}
+  <label>${esc(o.status === "NEEDS_INFO" ? t.replyNeedsInfo : t.replyMessage)}
     <textarea name="message" rows="4" maxlength="3000"></textarea></label>
   ${
     o.uploads
       ? `<div data-sp-upload data-token="${esc(o.token)}" data-prefix="${esc(o.uploadPrefix)}" data-endpoint="${esc(o.prefix)}/upload/">
-  <label>Add photos or documents <input type="file" multiple accept="${UPLOAD_TYPES.join(",")}"></label>
+  <label>${esc(t.addFiles)} <input type="file" multiple accept="${UPLOAD_TYPES.join(",")}"></label>
   <div class="sp-files" aria-live="polite"></div></div>`
       : ""
   }
-  <button type="submit">Send</button>
+  <button type="submit">${esc(t.send)}</button>
 </form>`
-    : `<p class="sp-muted">This claim is closed. If you have questions, reply to the email you received or contact the store.</p>`;
+    : `<p class="sp-muted">${esc(t.closed)}</p>`;
   return page(
     o,
-    `<h1>Claim ${esc(formatClaimNumber(o.number))}</h1>
-<p>Order ${esc(o.orderName)} · ${esc(TYPE_LABELS[o.type])} · filed ${esc(date(o.createdAt))}</p>
-<p><span class="sp-badge">${esc(STATUS_LABELS[o.status])}</span>${
-      o.status === "APPROVED" && o.resolution ? ` <span class="sp-muted">${esc(RESOLUTION_LABELS[o.resolution])}</span>` : ""
+    `<h1>${esc(fill(t.claimNumber, { number: formatClaimNumber(o.number) }))}</h1>
+<p>${esc(fill(t.claimMeta, { order: o.orderName, type: t.types[o.type], date: formatDate(o.createdAt, lang) }))}</p>
+<p><span class="sp-badge">${esc(t.statuses[o.status])}</span>${
+      o.status === "APPROVED" && o.resolution ? ` <span class="sp-muted">${esc(t.resolutions[o.resolution])}</span>` : ""
     }</p>
 ${notice({ ok: o.ok, error: o.error })}
-<table>${items}<tr><td><strong>Total claimed</strong></td><td style="text-align:right"><strong>${esc(money(o.amount, o.currency))}</strong></td></tr></table>
-<h2>History</h2>
+<table>${items}<tr><td><strong>${esc(t.totalClaimed)}</strong></td><td style="text-align:right"><strong>${esc(money(o.amount, o.currency, lang))}</strong></td></tr></table>
+<h2>${esc(t.history)}</h2>
 <ul class="sp-timeline">${timeline}</ul>
 ${reply}`,
   );

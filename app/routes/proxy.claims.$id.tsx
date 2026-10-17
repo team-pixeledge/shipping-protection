@@ -9,12 +9,16 @@ import { evidencePrefix, OPEN_STATUSES, type ClaimItem, type ClaimStatus, type C
 import { customerReply } from "../lib/claims.server";
 import { statusPage, unavailablePage } from "../lib/portal-pages";
 import { proxyContext, verifiedFiles } from "../lib/proxy.server";
+import { isLocale } from "../lib/i18n";
 
-async function load(request: Request, id: string | undefined, token: string | null) {
+async function load(request: Request, id: string | undefined, token: string | null, formLang?: unknown) {
   const ctx = await proxyContext(request);
   const proof = verifyToken(token, "claim", ctx.shop);
   const claim =
     proof && id && proof.id === id ? await prisma.claim.findFirst({ where: { id, shop: ctx.shop } }) : null;
+  // The claim's own language unless the link or form says otherwise.
+  const asked = formLang ?? new URL(request.url).searchParams.get("lang");
+  ctx.setLang(isLocale(asked) ? asked : (claim?.locale ?? null));
   return { ctx, claim, token: token ?? "" };
 }
 
@@ -49,10 +53,7 @@ async function render(
 }
 
 const notFound = (ctx: Awaited<ReturnType<typeof proxyContext>>) =>
-  ctx.render(
-    unavailablePage(ctx.opts, "This link isn't valid any more. Use the link in your most recent email, or contact the store."),
-    404,
-  );
+  ctx.render(unavailablePage(ctx.opts, ctx.t().errBadLink), 404);
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const l = await load(request, params.id, new URL(request.url).searchParams.get("t"));
@@ -62,16 +63,17 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
   const form = await request.formData();
-  const l = await load(request, params.id, String(form.get("token") ?? ""));
+  const l = await load(request, params.id, String(form.get("token") ?? ""), form.get("lang"));
+  const t = l.ctx.t();
   if (!l.claim || !l.ctx.admin) return notFound(l.ctx);
   const claim = l.claim;
   if (!OPEN_STATUSES.includes(claim.status as ClaimStatus)) {
-    return render({ ...l, claim }, { error: "This claim is closed. Please contact the store." });
+    return render({ ...l, claim }, { error: t.errClosed });
   }
   const message = String(form.get("message") ?? "").trim().slice(0, 3000);
   const files = uploadsConfigured() ? await verifiedFiles(form, claim.shop, claim.orderId) : [];
-  if (!message && !files.length) return render({ ...l, claim }, { error: "Write a message or add a file." });
+  if (!message && !files.length) return render({ ...l, claim }, { error: t.errEmpty });
 
   const updated = await customerReply(l.ctx.admin, { shop: claim.shop, claimId: claim.id, message, files });
-  return render({ ...l, claim: updated }, { ok: "Sent — the store will be in touch." });
+  return render({ ...l, claim: updated }, { ok: t.sentOk });
 };

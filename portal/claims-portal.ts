@@ -8,6 +8,25 @@ import { upload } from "@vercel/blob/client";
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_FILES = 8;
 
+// Messages in the page's language (data-sp-text on .sp-claims), English fallback.
+const TEXT = {
+  tooMany: "{name}: too many files ({max} at most)",
+  tooLarge: "{name}: too large (10 MB at most)",
+  uploading: "Uploading {name}…",
+  failed: "{name}: upload failed — try again",
+  remove: "Remove",
+};
+function loadText() {
+  try {
+    const raw = document.querySelector<HTMLElement>(".sp-claims")?.dataset.spText;
+    if (raw) Object.assign(TEXT, JSON.parse(raw));
+  } catch {
+    // keep English
+  }
+}
+const say = (template: string, name = "") =>
+  template.replace("{name}", name).replace("{max}", String(MAX_FILES));
+
 function setupUploads(box: HTMLElement) {
   const input = box.querySelector<HTMLInputElement>('input[type="file"]');
   const list = box.querySelector<HTMLElement>(".sp-files");
@@ -32,17 +51,17 @@ function setupUploads(box: HTMLElement) {
     input.value = "";
     for (const file of files) {
       if (count >= MAX_FILES) {
-        row(`${file.name}: too many files (${MAX_FILES} at most)`);
+        row(say(TEXT.tooMany, file.name));
         continue;
       }
       if (file.size > MAX_BYTES) {
-        row(`${file.name}: too large (10 MB at most)`);
+        row(say(TEXT.tooLarge, file.name));
         continue;
       }
       count++;
       pending++;
       submit.disabled = true;
-      const status = row(`Uploading ${file.name}…`);
+      const status = row(say(TEXT.uploading, file.name));
       try {
         const safe = file.name.replace(/[^\w.-]+/g, "_").slice(-80) || "file";
         const blob = await upload(prefix + safe, file, {
@@ -59,7 +78,7 @@ function setupUploads(box: HTMLElement) {
         status.textContent = `✓ ${file.name}`;
         const remove = document.createElement("button");
         remove.type = "button";
-        remove.textContent = "Remove";
+        remove.textContent = TEXT.remove;
         remove.style.cssText = "margin-left:.6rem;padding:.1rem .5rem;background:none;color:inherit;border:1px solid currentColor;";
         remove.addEventListener("click", () => {
           hidden.remove();
@@ -69,7 +88,7 @@ function setupUploads(box: HTMLElement) {
         status.appendChild(remove);
       } catch {
         count--;
-        status.textContent = `✗ ${file.name}: upload failed — try again`;
+        status.textContent = `✗ ${say(TEXT.failed, file.name)}`;
       } finally {
         pending--;
         if (!pending) submit.disabled = false;
@@ -83,6 +102,7 @@ function setupUploads(box: HTMLElement) {
 }
 
 function init() {
+  loadText();
   const root = document.querySelector<HTMLElement>(".sp-claims");
   // After a POST the page shows the result; point the address bar at the
   // GET version so a refresh doesn't resubmit.

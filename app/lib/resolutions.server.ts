@@ -11,12 +11,12 @@ import prisma from "../db.server";
 import {
   allocateRefund,
   formatClaimNumber,
-  RESOLUTION_KIND_LABELS,
   type ClaimItem,
   type ResolutionKind,
 } from "./claims";
 import { claimStatusUrl, getOrder, storeProfile } from "./claims.server";
-import { escapeHtml, sendEmail } from "./email.server";
+import { claimResolvedEmail, sendEmail } from "./email.server";
+import { claimLocale, DICTS, fill, formatMoney } from "./i18n";
 import type { AdminGraphql } from "./setup.server";
 
 type UserError = { field?: string[] | null; message: string };
@@ -199,6 +199,9 @@ export async function resolveClaim(admin: AdminGraphql, shop: string, claimId: s
     let done: Parameters<typeof finish>[3];
     let summary: string;
     let customerText: string;
+    // What the customer reads (event + email) is in the claim's language.
+    const lang = claimLocale(claim.locale);
+    const t = DICTS[lang];
 
     if (input.type === "REFUND") {
       const preview = await refundPreview(admin, claim.orderId, items);
@@ -258,7 +261,7 @@ export async function resolveClaim(admin: AdminGraphql, shop: string, claimId: s
       const cost = Number(refund.totalRefundedSet.shopMoney.amount);
       done = { amount: cost, currency: refund.totalRefundedSet.shopMoney.currencyCode, shopifyId: refund.id };
       summary = `Refunded ${money(amount, preview.currency)}${custom ? " (custom amount)" : ""} on ${claim.orderName}.`;
-      customerText = `We've refunded ${money(amount, preview.currency)} to your original payment method. It can take a few business days to appear.`;
+      customerText = fill(t.mailRefunded, { amount: formatMoney(amount, preview.currency, lang) });
     } else if (input.type === "REPLACEMENT") {
       const order = await getOrder(admin, claim.orderId);
       if (!order) throw new ResolutionError("The order can't be found in Shopify.");
@@ -327,7 +330,7 @@ export async function resolveClaim(admin: AdminGraphql, shop: string, claimId: s
         shopifyName: newOrder.name,
       };
       summary = `Replacement order ${newOrder.name} created (cost recorded: ${money(input.cost, shopRow.currency)}).`;
-      customerText = `We're sending you a replacement at no charge: order ${newOrder.name}. You'll get the usual shipping emails when it's on its way.`;
+      customerText = fill(t.mailReplacement, { replacement: newOrder.name });
     } else if (input.type === "STORE_CREDIT") {
       if (!(input.amount > 0)) throw new ResolutionError("Enter an amount above 0.");
       const order = await getOrder(admin, claim.orderId);
@@ -352,10 +355,10 @@ export async function resolveClaim(admin: AdminGraphql, shop: string, claimId: s
         },
       );
       check(res.storeCreditAccountCredit.userErrors, "Shopify refused the store credit");
-      const t = res.storeCreditAccountCredit.storeCreditAccountTransaction!;
-      done = { amount: Number(t.amount.amount), currency: t.amount.currencyCode, shopifyId: t.id };
+      const credit = res.storeCreditAccountCredit.storeCreditAccountTransaction!;
+      done = { amount: Number(credit.amount.amount), currency: credit.amount.currencyCode, shopifyId: credit.id };
       summary = `Store credit of ${money(input.amount, shopRow.currency)} issued.`;
-      customerText = `We've added ${money(input.amount, shopRow.currency)} of store credit to your account. It's applied at checkout when you're signed in.`;
+      customerText = fill(t.mailStoreCredit, { amount: formatMoney(input.amount, shopRow.currency, lang) });
     } else {
       if (!(input.cost >= 0)) throw new ResolutionError("Enter the cost (0 if there was none).");
       done = { amount: input.cost, currency: shopRow.currency, note: input.note || null };
@@ -389,27 +392,27 @@ async function tagOrder(admin: AdminGraphql, orderId: string) {
 
 async function emailCustomer(
   admin: AdminGraphql,
-  claim: { id: string; number: number; orderName: string; email: string; shop: string },
-  type: ResolutionKind,
+  claim: { id: string; number: number; orderName: string; email: string; shop: string; locale: string },
+  _type: ResolutionKind,
   text: string,
 ) {
   try {
     const shopRow = await prisma.shop.findUniqueOrThrow({ where: { shop: claim.shop } });
     const store = await storeProfile(admin);
-    const n = formatClaimNumber(claim.number);
-    const url = claimStatusUrl(claim.shop, shopRow.portalPath, claim.id);
-    const title = `Claim ${n}: ${RESOLUTION_KIND_LABELS[type].replace(/ \(.*\)$/, "")}`;
+    const lang = claimLocale(claim.locale);
+    const mail = claimResolvedEmail({
+      storeName: store.name,
+      number: claim.number,
+      orderName: claim.orderName,
+      statusUrl: claimStatusUrl(claim.shop, shopRow.portalPath, claim.id, lang),
+      lang,
+      text,
+    });
     const sent = await sendEmail({
       storeName: store.name,
       to: claim.email,
       replyTo: store.contactEmail ?? store.email,
-      subject: `${title} (order ${claim.orderName})`,
-      html: `<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.5;color:#222;padding:24px">
-<p style="color:#666;font-size:13px;margin:0 0 4px">${escapeHtml(store.name)}</p>
-<h1 style="font-size:20px;margin:0 0 16px">${escapeHtml(title)}</h1>
-<p>${escapeHtml(text)}</p>
-<p><a href="${escapeHtml(url)}">View your claim</a></p></body></html>`,
-      text: `${title}\n\n${text}\n\n${url}`,
+      ...mail,
       idempotencyKey: `claim-resolved-${claim.id}`,
     });
     await prisma.claimEvent.create({

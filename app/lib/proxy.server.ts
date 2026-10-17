@@ -7,6 +7,7 @@ import { pathnameAllowed, UPLOAD_TYPES, MAX_UPLOAD_BYTES, MAX_FILES_PER_MESSAGE 
 import { blobInfo } from "./blob.server";
 import type { PageOptions } from "./portal-pages";
 import { parseSettings } from "./settings";
+import { DICTS, fromAcceptLanguage, isLocale, type Locale } from "./i18n";
 
 const DEFAULT_PREFIX = "/apps/safeship";
 
@@ -24,13 +25,31 @@ export async function proxyContext(request: Request) {
     await prisma.shop.update({ where: { shop }, data: { portalPath: prefix } });
   }
   const settings = row?.settings ? parseSettings(row.settings) : null;
-  const opts: PageOptions = { prefix, appUrl: (process.env.SHOPIFY_APP_URL || "").replace(/\/$/, "") };
+  // Language: ?lang (links, the Liquid switch), else the browser's, else
+  // English. Routes that read a form apply its "lang" field (setLang).
+  const asked = url.searchParams.get("lang");
+  const explicit = isLocale(asked) ? asked : null;
+  const opts: PageOptions = {
+    prefix,
+    appUrl: (process.env.SHOPIFY_APP_URL || "").replace(/\/$/, ""),
+    lang: explicit ?? fromAcceptLanguage(request.headers.get("accept-language")) ?? "en",
+    detectLang: !explicit && request.method === "GET",
+  };
+  const setLang = (raw: unknown) => {
+    if (isLocale(raw)) {
+      opts.lang = raw;
+      opts.detectLang = false;
+    }
+  };
   const render = (html: string, status = 200) =>
     liquid(html, { status, headers: { "Cache-Control": "no-store" } });
 
   return {
     admin,
     shop,
+    setLang,
+    /** The page's strings (after setLang). */
+    t: () => DICTS[opts.lang as Locale],
     prefix,
     customerId,
     row,

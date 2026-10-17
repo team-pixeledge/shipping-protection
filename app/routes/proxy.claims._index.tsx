@@ -34,6 +34,8 @@ import { storeShipments, type FulfillmentNode } from "../lib/tracking.server";
 import { parseSettings } from "../lib/settings";
 import { claimFormPage, ineligiblePage, lookupPage, statusPage, unavailablePage } from "../lib/portal-pages";
 import { proxyContext, verifiedFiles } from "../lib/proxy.server";
+import { refusalText } from "../lib/i18n";
+import { clientIp, lookupAllowed } from "../lib/rate-limit.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const ctx = await proxyContext(request);
@@ -49,6 +51,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, shop, opts, render } = ctx;
   const settings = ctx.claimSettings!;
   const form = await request.formData();
+  ctx.setLang(form.get("lang"));
+  const t = ctx.t();
+  const lang = opts.lang!;
   const now = new Date();
 
   const priorClaims = (orderId: string) =>
@@ -64,6 +69,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       currency: order.currency,
       uploads: uploadsConfigured(),
       photosForDamage: settings.photosForDamage,
+      evidenceForAll: settings.evidenceForLostStolen,
       uploadPrefix: evidencePrefix(shop, order.id),
       ...extra,
     });
@@ -74,7 +80,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const email = String(form.get("email") ?? "").trim().slice(0, 254);
     const again = (error: string) =>
       render(lookupPage({ ...opts, policy: settings.policy, signedIn: !!ctx.customerId, error, orderName: typed, email }));
-    if (!typed || (!email && !ctx.customerId)) return again("Enter your order number and email.");
+    if (!typed || (!email && !ctx.customerId)) return again(t.errEnterBoth);
+    if (!(await lookupAllowed(shop, normalizeOrderName(typed), clientIp(request)))) return again(t.errTooMany);
 
     let orders: ClaimOrder[];
     try {
@@ -82,7 +89,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     } catch (err) {
       // Most likely: protected customer data (the order's email) not approved yet.
       console.error(`[claims] order lookup on ${shop}:`, err instanceof Error ? err.message : err);
-      return again("We can't look up orders right now. Please try again later or contact the store.");
+      return again(t.errLookupDown);
     }
     // One message for "no such order" and "wrong email": no probing for order numbers.
     const order = orders.find(
@@ -90,9 +97,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         normalizeOrderName(o.name) === normalizeOrderName(typed) &&
         ((email && sameEmail(o.email, email)) || (!!ctx.customerId && o.customerId === ctx.customerId)),
     );
-    if (!order) return again("We couldn't find an order with that number and email. Check both and try again.");
+    if (!order) return again(t.errNotFound);
     const contact = (email || order.email || "").toLowerCase();
-    if (!contact) return again("This order has no email address, so we can't send claim updates. Please contact the store.");
+    if (!contact) return again(t.errNoEmail);
 
     const isProtected = await orderIsProtected(shop, order);
     const ok = orderEligibility(order, { settings, isProtected, prior: await priorClaims(order.id), now });
@@ -101,8 +108,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         ineligiblePage({
           ...opts,
           orderName: order.name,
-          reason: ok.reason,
-          openClaimUrl: ok.openClaimId ? claimStatusPath(shop, opts.prefix, ok.openClaimId) : undefined,
+          reason: refusalText(ok.refusal, lang),
+          openClaimUrl: ok.openClaimId ? claimStatusPath(shop, opts.prefix, ok.openClaimId, lang) : undefined,
         }),
       );
     }
@@ -118,7 +125,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         ...opts,
         policy: settings.policy,
         signedIn: !!ctx.customerId,
-        error: "This page expired. Please find your order again.",
+        error: t.errExpired,
       }),
     );
   }
@@ -126,7 +133,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     console.error(`[claims] order ${proof.id} on ${shop}:`, err instanceof Error ? err.message : err);
     return null;
   });
-  if (!order) return render(unavailablePage(opts, "We couldn't load this order. Please contact the store."));
+  if (!order) return render(unavailablePage(opts, t.errCantLoad));
 
   const isProtected = await orderIsProtected(shop, order);
   const ok = orderEligibility(order, { settings, isProtected, prior: await priorClaims(order.id), now });
@@ -135,8 +142,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ineligiblePage({
         ...opts,
         orderName: order.name,
-        reason: ok.reason,
-        openClaimUrl: ok.openClaimId ? claimStatusPath(shop, opts.prefix, ok.openClaimId) : undefined,
+        reason: refusalText(ok.refusal, lang),
+        openClaimUrl: ok.openClaimId ? claimStatusPath(shop, opts.prefix, ok.openClaimId, lang) : undefined,
       }),
     );
   }
@@ -152,23 +159,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const { items, amount } = buildClaimItems(lines, picked);
   const files = uploadsConfigured() ? await verifiedFiles(form, shop, order.id) : [];
 
+  const tooEarly = isClaimType(type) ? typeProblem(order, type, settings, now) : null;
   const problem = !isClaimType(type)
-    ? "Choose what happened to your package."
-    : typeProblem(order, type, settings, now) ??
-      (!items.length
-        ? "Choose at least one affected item."
+    ? t.errChooseType
+    : tooEarly
+      ? refusalText(tooEarly, lang)
+      : !items.length
+        ? t.errChooseItem
         : description.length < 10
-          ? "Please describe what happened (at least a sentence)."
+          ? t.errDescribe
           : !form.get("confirm")
-            ? "Please confirm the information is true."
+            ? t.errConfirm
             : type === "DAMAGED" &&
                 settings.photosForDamage &&
                 uploadsConfigured() &&
                 !files.some((f) => f.contentType.startsWith("image/"))
-              ? "Please add at least one photo of the damage."
+              ? t.errPhoto
               : type !== "DAMAGED" && settings.evidenceForLostStolen && uploadsConfigured() && !files.length
-                ? "Please add a supporting document, such as a police report or a carrier's reply."
-                : null);
+                ? t.errDocument
+                : null;
   if (problem) {
     return render(
       formFor(order, rawToken, proof.email, { error: problem, values: { type, description, picked } }),
@@ -186,7 +195,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }),
   ]);
   const overLimit = limitProblem(amount, Number(onOrder._sum.amount ?? 0), Number(byCustomer._sum.amount ?? 0), settings);
-  if (overLimit) return render(ineligiblePage({ ...opts, orderName: order.name, reason: overLimit }));
+  if (overLimit) return render(ineligiblePage({ ...opts, orderName: order.name, reason: refusalText(overLimit, lang) }));
 
   const tracking = parseSettings(ctx.row!.settings).tracking;
   const risk = await assessClaim(admin, {
@@ -214,6 +223,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     files,
     trackingNumbers: risk.trackingNumbers,
     addressHash: risk.addressHash,
+    locale: lang,
   });
   // Follow this order's packages from now on (it may not have bought protection).
   await storeShipments(shop, order, (order.fulfillments ?? []) as FulfillmentNode[], tracking).catch(
@@ -229,7 +239,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return render(
     statusPage({
       ...opts,
-      replaceUrl: `${opts.prefix}/claims/${claim.id}?t=${encodeURIComponent(token)}`,
+      replaceUrl: `${opts.prefix}/claims/${claim.id}?t=${encodeURIComponent(token)}&lang=${lang}`,
       number: claim.number,
       orderName: claim.orderName,
       type: claim.type as ClaimType,
@@ -244,7 +254,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       claimId: claim.id,
       uploads: uploadsConfigured(),
       uploadPrefix: evidencePrefix(shop, order.id),
-      ok: "Thanks — your claim has been filed. We've emailed you a confirmation with a link to this page.",
+      ok: t.filedOk,
     }),
   );
 };

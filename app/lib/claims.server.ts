@@ -262,12 +262,14 @@ export async function assessClaim(
 // ---- Links ----
 
 /** Storefront path of a claim's status page, with its access token. */
-export const claimStatusPath = (shop: string, portalPath: string, claimId: string) =>
-  `${portalPath}/claims/${claimId}?t=${encodeURIComponent(signToken({ p: "claim", shop, id: claimId }))}`;
+export const claimStatusPath = (shop: string, portalPath: string, claimId: string, lang?: string) =>
+  `${portalPath}/claims/${claimId}?t=${encodeURIComponent(signToken({ p: "claim", shop, id: claimId }))}${
+    lang ? `&lang=${encodeURIComponent(lang)}` : ""
+  }`;
 
 /** Absolute link for emails (the myshopify domain redirects to the primary one). */
-export const claimStatusUrl = (shop: string, portalPath: string, claimId: string) =>
-  `https://${shop}${claimStatusPath(shop, portalPath, claimId)}`;
+export const claimStatusUrl = (shop: string, portalPath: string, claimId: string, lang?: string) =>
+  `https://${shop}${claimStatusPath(shop, portalPath, claimId, lang)}`;
 
 export const claimAdminUrl = (shop: string, claimId: string) =>
   `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/, "")}/apps/${process.env.SHOPIFY_API_KEY}/app/claims/${claimId}`;
@@ -320,6 +322,8 @@ export interface NewClaim {
   source?: "CUSTOMER" | "STAFF";
   /** Internal note on a staff-created claim. */
   staffNote?: string | null;
+  /** The language the customer filed in; else the order's customer locale. */
+  locale?: string;
 }
 
 /** Creates the claim with the next per-shop number (retries if two land at once). */
@@ -345,7 +349,7 @@ export async function createClaim(c: NewClaim) {
             flags: c.flags,
             trackingNumbers: c.trackingNumbers,
             addressHash: c.addressHash,
-            locale: claimLocale(c.order.locale),
+            locale: c.locale ?? claimLocale(c.order.locale),
             source: c.source ?? "CUSTOMER",
             shipments: c.order.shipments as unknown as Prisma.InputJsonValue,
             events: {
@@ -388,11 +392,13 @@ async function sendNewClaimEmails(admin: AdminGraphql, claimId: string, to: { cu
   const claim = await prisma.claim.findUniqueOrThrow({ where: { id: claimId }, include: { shopRef: true } });
   const store = await storeProfile(admin);
   const settings = parseSettings(claim.shopRef.settings).claims;
+  const lang = claimLocale(claim.locale);
   const ctx = {
     storeName: store.name,
     number: claim.number,
     orderName: claim.orderName,
-    statusUrl: claimStatusUrl(claim.shop, claim.shopRef.portalPath, claim.id),
+    statusUrl: claimStatusUrl(claim.shop, claim.shopRef.portalPath, claim.id, lang),
+    lang,
   };
   if (to.customer) {
     const toCustomer = claimReceivedEmail(ctx);
@@ -485,7 +491,8 @@ export async function changeClaimStatus(
       storeName: store.name,
       number: claim.number,
       orderName: claim.orderName,
-      statusUrl: claimStatusUrl(claim.shop, claim.shopRef.portalPath, claim.id),
+      statusUrl: claimStatusUrl(claim.shop, claim.shopRef.portalPath, claim.id, claimLocale(claim.locale)),
+      lang: claimLocale(claim.locale),
       status: opts.to,
       resolution: (claim.resolution as Resolution | null) ?? null,
       message,
@@ -506,7 +513,8 @@ export async function messageCustomer(admin: AdminGraphql, shop: string, claimId
       storeName: store.name,
       number: claim.number,
       orderName: claim.orderName,
-      statusUrl: claimStatusUrl(claim.shop, claim.shopRef.portalPath, claim.id),
+      statusUrl: claimStatusUrl(claim.shop, claim.shopRef.portalPath, claim.id, claimLocale(claim.locale)),
+      lang: claimLocale(claim.locale),
       status: claim.status as ClaimStatus,
       resolution: (claim.resolution as Resolution | null) ?? null,
       message,

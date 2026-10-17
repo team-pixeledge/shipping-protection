@@ -36,6 +36,7 @@ import {
 } from "../lib/claims.server";
 import { parseSettings } from "../lib/settings";
 import { ensureShop } from "../lib/shop.server";
+import { refusalText } from "../lib/i18n";
 import { storeShipments, type FulfillmentNode } from "../lib/tracking.server";
 
 async function policyProblems(
@@ -180,13 +181,10 @@ export const action = async ({
   ]);
   const outside = [
     policy.problem,
-    typeProblem(order, type, settings.claims, now),
-    limitProblem(
-      amount,
-      Number(onOrder._sum.amount ?? 0),
-      Number(byCustomer._sum.amount ?? 0),
-      settings.claims,
-    ),
+    ...[
+      typeProblem(order, type, settings.claims, now),
+      limitProblem(amount, Number(onOrder._sum.amount ?? 0), Number(byCustomer._sum.amount ?? 0), settings.claims),
+    ].map((r) => (r ? refusalText(r) : null)),
   ].filter(Boolean) as string[];
   const override = text(body.override, 1000);
   if (outside.length && !override) {

@@ -2,7 +2,8 @@
 // nothing is sent and the claim's history says so — a claim never fails
 // because an email couldn't go out.
 import { Resend } from "resend";
-import { formatClaimNumber, RESOLUTION_LABELS, STATUS_LABELS, type ClaimStatus, type Resolution } from "./claims";
+import { formatClaimNumber, type ClaimStatus, type Resolution } from "./claims";
+import { DICTS, fill, type Locale } from "./i18n";
 
 export type EmailResult = { ok: true } | { ok: false; error: string };
 
@@ -74,16 +75,20 @@ export interface ClaimEmailContext {
   number: number;
   orderName: string;
   statusUrl: string;
+  /** The claim's language (Claim.locale). */
+  lang?: Locale;
 }
 
 /** To the customer, right after they file. */
 export function claimReceivedEmail(c: ClaimEmailContext) {
-  const title = `We've received your claim ${formatClaimNumber(c.number)}`;
-  const body = `We've received your claim for order ${c.orderName}. We'll review it and email you when there's an update.`;
+  const t = DICTS[c.lang ?? "en"];
+  const v = { number: formatClaimNumber(c.number), order: c.orderName };
+  const title = fill(t.mailReceivedTitle, v);
+  const body = fill(t.mailReceivedBody, v);
   return {
-    subject: `${title} (order ${c.orderName})`,
-    html: layout(c.storeName, title, paragraphs(body), { href: c.statusUrl, label: "View your claim" }),
-    text: `${title}\n\n${body}\n\nView your claim: ${c.statusUrl}`,
+    subject: fill(t.mailSubject, { title, order: c.orderName }),
+    html: layout(c.storeName, title, paragraphs(body), { href: c.statusUrl, label: t.mailViewClaim }),
+    text: `${title}\n\n${body}\n\n${t.mailViewClaim}: ${c.statusUrl}`,
   };
 }
 
@@ -91,25 +96,33 @@ export function claimReceivedEmail(c: ClaimEmailContext) {
 export function claimUpdateEmail(
   c: ClaimEmailContext & { status: ClaimStatus; resolution?: Resolution | null; message?: string | null },
 ) {
-  const n = formatClaimNumber(c.number);
-  const lead: Record<ClaimStatus, string> = {
-    OPEN: `Your claim ${n} for order ${c.orderName} is being reviewed.`,
-    NEEDS_INFO: `We need a little more information to review your claim ${n} for order ${c.orderName}. Please reply using the link below.`,
-    APPROVED: `Good news: your claim ${n} for order ${c.orderName} has been approved${
-      c.resolution ? ` (${RESOLUTION_LABELS[c.resolution].toLowerCase()})` : ""
-    }.`,
-    REJECTED: `We've reviewed your claim ${n} for order ${c.orderName} and weren't able to approve it.`,
-  };
-  const title = `Claim ${n}: ${STATUS_LABELS[c.status]}`;
+  const t = DICTS[c.lang ?? "en"];
+  const v = { number: formatClaimNumber(c.number), order: c.orderName };
+  const lead =
+    c.status === "APPROVED" && c.resolution
+      ? fill(t.mailApprovedWith, { ...v, resolution: t.resolutions[c.resolution].toLowerCase() })
+      : fill(t.mailLead[c.status], v);
+  const title = fill(t.mailUpdateTitle, { ...v, status: t.statuses[c.status] });
   const message = c.message?.trim() ? `\n\n${c.message.trim()}` : "";
-  const body = lead[c.status] + message;
+  const body = lead + message;
   return {
-    subject: `${title} (order ${c.orderName})`,
+    subject: fill(t.mailSubject, { title, order: c.orderName }),
     html: layout(c.storeName, title, paragraphs(body), {
       href: c.statusUrl,
-      label: c.status === "NEEDS_INFO" ? "Reply to the store" : "View your claim",
+      label: c.status === "NEEDS_INFO" ? t.mailReply : t.mailViewClaim,
     }),
     text: `${title}\n\n${body}\n\n${c.statusUrl}`,
+  };
+}
+
+/** To the customer, when an approved claim's resolution was carried out. */
+export function claimResolvedEmail(c: ClaimEmailContext & { text: string }) {
+  const t = DICTS[c.lang ?? "en"];
+  const title = fill(t.mailResolvedTitle, { number: formatClaimNumber(c.number) });
+  return {
+    subject: fill(t.mailSubject, { title, order: c.orderName }),
+    html: layout(c.storeName, title, paragraphs(c.text), { href: c.statusUrl, label: t.mailViewClaim }),
+    text: `${title}\n\n${c.text}\n\n${c.statusUrl}`,
   };
 }
 
