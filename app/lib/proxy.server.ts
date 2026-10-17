@@ -8,6 +8,8 @@ import { blobInfo } from "./blob.server";
 import type { PageOptions } from "./portal-pages";
 import { parseSettings } from "./settings";
 import { DICTS, fromAcceptLanguage, isLocale, type Locale } from "./i18n";
+import { hasFeature, isPlanId } from "./plan";
+import { effectiveClaimSettings } from "./gates";
 
 const DEFAULT_PREFIX = "/apps/safeship";
 
@@ -25,6 +27,9 @@ export async function proxyContext(request: Request) {
     await prisma.shop.update({ where: { shop }, data: { portalPath: prefix } });
   }
   const settings = row?.settings ? parseSettings(row.settings) : null;
+  const plan = isPlanId(row?.plan) ? row.plan : null;
+  // Other languages are a Growth feature; Starter pages and emails are English.
+  const languages = hasFeature(plan, "languages");
   // Language: ?lang (links, the Liquid switch), else the browser's, else
   // English. Routes that read a form apply its "lang" field (setLang).
   const asked = url.searchParams.get("lang");
@@ -32,11 +37,11 @@ export async function proxyContext(request: Request) {
   const opts: PageOptions = {
     prefix,
     appUrl: (process.env.SHOPIFY_APP_URL || "").replace(/\/$/, ""),
-    lang: explicit ?? fromAcceptLanguage(request.headers.get("accept-language")) ?? "en",
-    detectLang: !explicit && request.method === "GET",
+    lang: languages ? (explicit ?? fromAcceptLanguage(request.headers.get("accept-language")) ?? "en") : "en",
+    detectLang: languages && !explicit && request.method === "GET",
   };
   const setLang = (raw: unknown) => {
-    if (isLocale(raw)) {
+    if (languages && isLocale(raw)) {
       opts.lang = raw;
       opts.detectLang = false;
     }
@@ -53,7 +58,9 @@ export async function proxyContext(request: Request) {
     prefix,
     customerId,
     row,
-    claimSettings: settings?.claims ?? null,
+    plan,
+    /** As the plan may use them (gates.ts). */
+    claimSettings: settings ? effectiveClaimSettings(settings.claims, plan) : null,
     coverage: settings?.coverage,
     opts,
     render,

@@ -3,12 +3,13 @@ import {
   ApiVersion,
   AppDistribution,
   BillingInterval,
+  BillingReplacementBehavior,
   shopifyApp,
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 import { ensureShop } from "./lib/shop.server";
-import { PLAN, PLAN_TERMS } from "./lib/plan";
+import { PLAN_ORDER, PLANS, planTerms } from "./lib/plan";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
@@ -19,23 +20,25 @@ const shopify = shopifyApp({
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
-  // One usage plan (app/lib/plan.ts): amount is the cycle's cap; each
-  // protected order past the free ones is a usage record (billing.server.ts).
-  billing: {
-    [PLAN.name]: {
-      lineItems: [
-        {
-          interval: BillingInterval.Usage,
-          amount: PLAN.cap,
-          currencyCode: PLAN.currency,
-          terms: PLAN_TERMS,
-        },
-      ],
-    },
-  },
-  future: {
-    expiringOfflineAccessTokens: true,
-  },
+  // One usage subscription per plan (app/lib/plan.ts): amount is the
+  // cycle's cap; each protected order past the free ones is a usage record
+  // (billing.server.ts). Switching plans replaces the subscription at once.
+  billing: Object.fromEntries(
+    PLAN_ORDER.map((id) => [
+      PLANS[id].billingName,
+      {
+        replacementBehavior: BillingReplacementBehavior.ApplyImmediately,
+        lineItems: [
+          {
+            interval: BillingInterval.Usage,
+            amount: PLANS[id].cap,
+            currencyCode: PLANS[id].currency,
+            terms: planTerms(PLANS[id]),
+          },
+        ],
+      },
+    ]),
+  ),
   hooks: {
     // Only records the shop. Nothing is created in the store until the
     // merchant saves Settings — installing changes nothing on the storefront.

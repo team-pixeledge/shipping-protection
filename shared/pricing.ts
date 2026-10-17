@@ -140,6 +140,8 @@ export interface ProtectionConfig {
    * line to the exact fee, so the variant only needs to be close.
    */
   exact?: boolean;
+  /** The plan includes the checkout toggle (extensions/protection-checkout). */
+  checkout?: boolean;
 }
 
 /**

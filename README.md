@@ -48,8 +48,12 @@ the cart, on every Shopify plan.
   in Europe), set in that market's price list.
 - **Shopify Plus:** exact percentage fees (a cart transform) and a
   protection toggle inside checkout (a checkout UI block).
-- **Billing:** one usage plan — first 50 protected orders per 30-day cycle
-  free, then $0.05 each, capped at $299 — with a Plan & pricing page and FAQ.
+- **Plans:** three usage-based plans, no monthly fee — Starter ($0.03),
+  Growth ($0.05) and Pro ($0.08) per protected order after 50 free each
+  30 days, capped at $149 / $299 / $499. Plan & pricing has plan cards, a
+  full feature comparison, costs by volume and an FAQ. Tracking, risk
+  signals, claim rules, staff claims and languages are on Growth; market
+  prices and the Plus checkout features on Pro.
 
 ## How it works
 
@@ -88,7 +92,7 @@ widget adds whichever variant matches the fee.
 | `app/routes/app.claims.new.tsx` | Admin: staff-created claims |
 | `app/lib/daily.server.ts` + `app/routes/api.cron.daily.tsx` | Daily job (Vercel Cron): tracking, orphan uploads, rate-limit rows |
 | `app/lib/i18n.ts` | Claims page and customer email translations |
-| `app/lib/plan.ts` / `billing.server.ts` / `app/routes/app.plan.tsx` | The plan, usage charges, Plan & pricing page |
+| `app/lib/plan.ts` / `gates.ts` / `billing.server.ts` / `app/routes/app.plan.tsx` | Plans and features, feature gates, usage charges, Plan & pricing page |
 | `app/lib/markets.server.ts` | Prices by market (price lists) |
 | `extensions/protection-transform/` + `app/lib/cart-transform.server.ts` | Exact pricing cart transform (Plus) |
 | `extensions/protection-checkout/` | Checkout toggle (Plus), Preact checkout UI extension |
@@ -319,4 +323,6 @@ npx shopify app build --skip-dependencies-installation   # all extensions
 - **Repeat-address checks need the address field** (protected customer data).
   Without it, they're skipped.
 - **Usage charges count orders when placed;** cancellations aren't refunded.
+- **Plan prices are a proposal** in `app/lib/plan.ts`, to be confirmed before
+  launch.
 - **Not built yet:** A/B tests, widget analytics and charts (phase 4).

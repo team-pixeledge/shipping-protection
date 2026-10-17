@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import type {
+  ActionFunctionArgs,
+  HeadersFunction,
+  LoaderFunctionArgs,
+} from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -36,6 +40,8 @@ import { EMBED_HANDLE, embedStatus } from "../lib/embed.server";
 import { listMarkets } from "../lib/markets.server";
 import { exactPricingAvailable } from "../lib/cart-transform.server";
 import { MAX_MARKET_PRICES } from "../lib/settings";
+import { hasFeature, isPlanId } from "../lib/plan";
+import { UpgradeNotice } from "../components/Upgrade";
 import type { TrackingSettings } from "../lib/tracking";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -49,6 +55,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return {
     embed: embed.status,
     plus,
+    features: Object.fromEntries(
+      (
+        [
+          "tracking",
+          "claimRules",
+          "marketPrices",
+          "exactPricing",
+          "checkoutToggle",
+        ] as const
+      ).map((f) => [f, hasFeature(isPlanId(shop.plan) ? shop.plan : null, f)]),
+    ) as Record<
+      | "tracking"
+      | "claimRules"
+      | "marketPrices"
+      | "exactPricing"
+      | "checkoutToggle",
+      boolean
+    >,
     embedUrl: `shopify://admin/themes/current/editor?context=apps&activateAppId=${apiKey}/${EMBED_HANDLE}`,
     settings: shop.settings ? parseSettings(shop.settings) : DEFAULT_SETTINGS,
     configured: shop.settings !== null && shop.productId !== null,
@@ -60,15 +84,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   };
 };
 
-type MarketRow = { id: number; name: string; currency: string; countries: string[] };
+type MarketRow = {
+  id: number;
+  name: string;
+  currency: string;
+  countries: string[];
+};
 type ActionResult =
-  | { ok: true; intent: string; problems?: string[]; warnings?: string[]; markets?: MarketRow[] }
+  | {
+      ok: true;
+      intent: string;
+      problems?: string[];
+      warnings?: string[];
+      markets?: MarketRow[];
+    }
   | { ok: false; errors: string[] };
 
-export const action = async ({ request }: ActionFunctionArgs): Promise<ActionResult> => {
+export const action = async ({
+  request,
+}: ActionFunctionArgs): Promise<ActionResult> => {
   const { session, admin } = await authenticate.admin(request);
   await ensureShop(session.shop);
-  const body = (await request.json()) as { intent?: string; settings?: unknown };
+  const body = (await request.json()) as {
+    intent?: string;
+    settings?: unknown;
+  };
 
   if (body.intent === "markets") {
     try {
@@ -76,16 +116,29 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionRes
       return {
         ok: true,
         intent: "markets",
-        markets: markets.map((m) => ({ id: m.id, name: m.name, currency: m.currency, countries: m.countries })),
+        markets: markets.map((m) => ({
+          id: m.id,
+          name: m.name,
+          currency: m.currency,
+          countries: m.countries,
+        })),
       };
     } catch (err) {
-      return { ok: false, errors: [`Couldn't load your markets: ${err instanceof Error ? err.message : String(err)}`] };
+      return {
+        ok: false,
+        errors: [
+          `Couldn't load your markets: ${err instanceof Error ? err.message : String(err)}`,
+        ],
+      };
     }
   }
 
   if (body.intent === "remove") {
     const problems = await removeFromStore(admin, session.shop);
-    await prisma.shop.update({ where: { shop: session.shop }, data: { settings: Prisma.DbNull } });
+    await prisma.shop.update({
+      where: { shop: session.shop },
+      data: { settings: Prisma.DbNull },
+    });
     return { ok: true, intent: "remove", problems };
   }
 
@@ -104,25 +157,52 @@ export const action = async ({ request }: ActionFunctionArgs): Promise<ActionRes
   } catch (err) {
     return {
       ok: false,
-      errors: [`Saved, but your store couldn't be updated: ${err instanceof Error ? err.message : String(err)}`],
+      errors: [
+        `Saved, but your store couldn't be updated: ${err instanceof Error ? err.message : String(err)}`,
+      ],
     };
   }
 };
 
 /** Sample cart values sized to the currency (¥10 isn't a cart). */
 const SCALE: Record<string, number> = {
-  JPY: 100, KRW: 1000, INR: 50, HUF: 300, IDR: 10000, VND: 20000, CLP: 800, COP: 3000, ISK: 100,
-  PHP: 50, THB: 30, TWD: 30, CZK: 20, RUB: 80, MXN: 15, ZAR: 15, TRY: 30, PKR: 250, NGN: 1000,
+  JPY: 100,
+  KRW: 1000,
+  INR: 50,
+  HUF: 300,
+  IDR: 10000,
+  VND: 20000,
+  CLP: 800,
+  COP: 3000,
+  ISK: 100,
+  PHP: 50,
+  THB: 30,
+  TWD: 30,
+  CZK: 20,
+  RUB: 80,
+  MXN: 15,
+  ZAR: 15,
+  TRY: 30,
+  PKR: 250,
+  NGN: 1000,
 };
 const SAMPLES = [10, 25, 50, 100, 250, 500, 1000];
 
 export default function SettingsPage() {
   const loaded = useLoaderData<typeof loader>();
   const [s, setS] = useState<Settings>(loaded.settings);
-  const [countries, setCountries] = useState(loaded.settings.optInCountries.join(", "));
-  const [covTags, setCovTags] = useState(loaded.settings.coverage.tags.join(", "));
-  const [covTypes, setCovTypes] = useState(loaded.settings.coverage.productTypes.join(", "));
-  const [covVendors, setCovVendors] = useState(loaded.settings.coverage.vendors.join(", "));
+  const [countries, setCountries] = useState(
+    loaded.settings.optInCountries.join(", "),
+  );
+  const [covTags, setCovTags] = useState(
+    loaded.settings.coverage.tags.join(", "),
+  );
+  const [covTypes, setCovTypes] = useState(
+    loaded.settings.coverage.productTypes.join(", "),
+  );
+  const [covVendors, setCovVendors] = useState(
+    loaded.settings.coverage.vendors.join(", "),
+  );
   const [tryValue, setTryValue] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
   const fetcher = useFetcher<ActionResult>();
@@ -132,13 +212,23 @@ export default function SettingsPage() {
   useEffect(() => {
     const d = fetcher.data;
     if (!d) return;
-    if (d.ok && d.intent === "save") shopify.toast.show("Saved — your store is updated");
-    if (d.ok && d.intent === "remove") shopify.toast.show("Removed from your store");
+    if (d.ok && d.intent === "save")
+      shopify.toast.show("Saved — your store is updated");
+    if (d.ok && d.intent === "remove")
+      shopify.toast.show("Removed from your store");
   }, [fetcher.data, shopify]);
 
-  const setClaims = (patch: Partial<ClaimSettings>) => setS({ ...s, claims: { ...s.claims, ...patch } });
-  const setTracking = (patch: Partial<TrackingSettings>) => setS({ ...s, tracking: { ...s.tracking, ...patch } });
-  const days = (label: string, value: number, max: number, onChange: (n: number) => void, details?: string) => (
+  const setClaims = (patch: Partial<ClaimSettings>) =>
+    setS({ ...s, claims: { ...s.claims, ...patch } });
+  const setTracking = (patch: Partial<TrackingSettings>) =>
+    setS({ ...s, tracking: { ...s.tracking, ...patch } });
+  const days = (
+    label: string,
+    value: number,
+    max: number,
+    onChange: (n: number) => void,
+    details?: string,
+  ) => (
     <s-number-field
       label={label}
       details={details}
@@ -150,26 +240,46 @@ export default function SettingsPage() {
       onInput={(e) => onChange(Number(e.currentTarget.value) || 0)}
     />
   );
-  const setRules = (patch: Partial<PricingRules>) => setS({ ...s, rules: { ...s.rules, ...patch } });
+  const setRules = (patch: Partial<PricingRules>) =>
+    setS({ ...s, rules: { ...s.rules, ...patch } });
   const setTier = (i: number, patch: Partial<Tier>) =>
-    setRules({ tiers: s.rules.tiers.map((t, j) => (j === i ? { ...t, ...patch } : t)) });
+    setRules({
+      tiers: s.rules.tiers.map((t, j) => (j === i ? { ...t, ...patch } : t)),
+    });
 
   const parsedCountries = countries
     .split(/[\s,]+/)
     .map((c) => c.trim().toUpperCase())
     .filter(Boolean);
-  const list = (v: string) => [...new Set(v.split(",").map((x) => x.trim()).filter(Boolean))];
+  const list = (v: string) => [
+    ...new Set(
+      v
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean),
+    ),
+  ];
   const current: Settings = {
     ...s,
     optInCountries: parsedCountries,
-    coverage: { ...s.coverage, tags: list(covTags), productTypes: list(covTypes), vendors: list(covVendors) },
+    coverage: {
+      ...s.coverage,
+      tags: list(covTags),
+      productTypes: list(covTypes),
+      vendors: list(covVendors),
+    },
   };
   const errors = settingsErrors(current);
   const missing = missingOptInCountries(current);
-  const dirty = JSON.stringify(current) !== JSON.stringify(loaded.settings) || !loaded.configured;
+  const dirty =
+    JSON.stringify(current) !== JSON.stringify(loaded.settings) ||
+    !loaded.configured;
 
   const money = (n: number) =>
-    new Intl.NumberFormat(undefined, { style: "currency", currency: loaded.currency }).format(n);
+    new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: loaded.currency,
+    }).format(n);
   const hasErrors = errors.length > 0;
   const ladder = useMemo(
     () => (hasErrors ? [] : buildLadder(s.rules, loaded.decimals)),
@@ -178,15 +288,31 @@ export default function SettingsPage() {
   const charged = (subtotal: number) => {
     const fee = computeFee(s.rules, subtotal);
     if (fee === null || !ladder.length) return null;
-    return { fee, price: fromMinor(ladder[snapIndex(ladder, toMinor(fee, loaded.decimals))], loaded.decimals) };
+    return {
+      fee,
+      price: fromMinor(
+        ladder[snapIndex(ladder, toMinor(fee, loaded.decimals))],
+        loaded.decimals,
+      ),
+    };
   };
   const scale = SCALE[loaded.currency] ?? 1;
-  const samples = [...SAMPLES.map((n) => n * scale), ...(Number(tryValue) > 0 ? [Number(tryValue)] : [])];
+  const samples = [
+    ...SAMPLES.map((n) => n * scale),
+    ...(Number(tryValue) > 0 ? [Number(tryValue)] : []),
+  ];
   const usesPercent =
-    s.rules.mode === "PERCENT" || (s.rules.mode === "TIERED" && s.rules.tiers.some((t) => t.type === "PERCENT"));
+    s.rules.mode === "PERCENT" ||
+    (s.rules.mode === "TIERED" &&
+      s.rules.tiers.some((t) => t.type === "PERCENT"));
 
   const num = (v: string) => (v.trim() === "" ? NaN : Number(v));
-  const field = (label: string, value: number, onChange: (n: number) => void, opts: { suffix?: string; details?: string } = {}) => (
+  const field = (
+    label: string,
+    value: number,
+    onChange: (n: number) => void,
+    opts: { suffix?: string; details?: string } = {},
+  ) => (
     <s-number-field
       label={label}
       value={Number.isFinite(value) ? String(value) : ""}
@@ -203,21 +329,34 @@ export default function SettingsPage() {
       type: "product",
       multiple: true,
       filter: { variants: false },
-      selectionIds: s.coverage.productIds.map((id) => ({ id: `gid://shopify/Product/${id}` })),
+      selectionIds: s.coverage.productIds.map((id) => ({
+        id: `gid://shopify/Product/${id}`,
+      })),
     })) as { id: string; title: string }[] | undefined;
     if (!picked) return;
     const ids = picked.map((p) => Number(p.id.split("/").pop())).slice(0, 250);
     setS({
       ...s,
       coverage: { ...s.coverage, productIds: ids },
-      coverageProductTitles: Object.fromEntries(picked.map((p) => [p.id.split("/").pop()!, p.title])),
+      coverageProductTitles: Object.fromEntries(
+        picked.map((p) => [p.id.split("/").pop()!, p.title]),
+      ),
     });
   };
   const removeProduct = (id: number) =>
-    setS({ ...s, coverage: { ...s.coverage, productIds: s.coverage.productIds.filter((x) => x !== id) } });
+    setS({
+      ...s,
+      coverage: {
+        ...s.coverage,
+        productIds: s.coverage.productIds.filter((x) => x !== id),
+      },
+    });
 
   const save = () =>
-    fetcher.submit({ intent: "save", settings: current } as never, { method: "POST", encType: "application/json" });
+    fetcher.submit({ intent: "save", settings: current } as never, {
+      method: "POST",
+      encType: "application/json",
+    });
 
   return (
     <s-page heading="Settings">
@@ -230,15 +369,17 @@ export default function SettingsPage() {
         Save
       </s-button>
 
-      {fetcher.data?.ok && fetcher.data.intent === "save" && (fetcher.data.warnings?.length ?? 0) > 0 && (
-        <s-banner tone="warning" heading="Saved, with something to check">
-          <s-unordered-list>
-            {fetcher.data.warnings!.map((w) => (
-              <s-list-item key={w}>{w}</s-list-item>
-            ))}
-          </s-unordered-list>
-        </s-banner>
-      )}
+      {fetcher.data?.ok &&
+        fetcher.data.intent === "save" &&
+        (fetcher.data.warnings?.length ?? 0) > 0 && (
+          <s-banner tone="warning" heading="Saved, with something to check">
+            <s-unordered-list>
+              {fetcher.data.warnings!.map((w) => (
+                <s-list-item key={w}>{w}</s-list-item>
+              ))}
+            </s-unordered-list>
+          </s-banner>
+        )}
       {fetcher.data && !fetcher.data.ok && (
         <s-banner tone="critical" heading="Not saved">
           <s-unordered-list>
@@ -255,13 +396,15 @@ export default function SettingsPage() {
             title: "Approve the plan",
             body: (
               <>
-                Done — see <s-link href="/app/plan">Plan &amp; pricing</s-link> for what you pay and the FAQ.
+                Done — see <s-link href="/app/plan">Plan &amp; pricing</s-link>{" "}
+                for what you pay and the FAQ.
               </>
             ),
           },
           {
             done: loaded.configured,
-            title: "Choose your pricing and which products are covered, then Save",
+            title:
+              "Choose your pricing and which products are covered, then Save",
             body: "Pricing and “Which products are covered” below. The Preview shows what customers pay for sample carts. Saving creates the hidden Shipping protection product and the checkout rule in your store.",
           },
           {
@@ -269,12 +412,15 @@ export default function SettingsPage() {
             title: "Turn on the app embed in your theme",
             body: (
               <>
-                This shows the protection toggle in the cart drawer and cart page.{" "}
+                This shows the protection toggle in the cart drawer and cart
+                page.{" "}
                 <s-link href={loaded.embedUrl} target="_top">
                   Open the theme editor
                 </s-link>
-                , switch on &ldquo;Shipping protection&rdquo; and save the theme.
-                {loaded.embed === "unknown" && " (We couldn't check your theme — make sure it's on.)"}
+                , switch on &ldquo;Shipping protection&rdquo; and save the
+                theme.
+                {loaded.embed === "unknown" &&
+                  " (We couldn't check your theme — make sure it's on.)"}
               </>
             ),
           },
@@ -305,8 +451,9 @@ export default function SettingsPage() {
 
       {!loaded.configured && (
         <s-banner tone="info" heading="Nothing is live yet">
-          Saving this page creates the hidden &ldquo;Shipping protection&rdquo; product and the checkout rule in
-          your store. Customers see the toggle once you also turn on the app embed (see Home).
+          Saving this page creates the hidden &ldquo;Shipping protection&rdquo;
+          product and the checkout rule in your store. Customers see the toggle
+          once you also turn on the app embed (see Home).
         </s-banner>
       )}
 
@@ -324,30 +471,50 @@ export default function SettingsPage() {
           <s-select
             label="How the fee is calculated"
             value={s.rules.mode}
-            onChange={(e) => setRules({ mode: e.currentTarget.value as FeeMode })}
+            onChange={(e) =>
+              setRules({ mode: e.currentTarget.value as FeeMode })
+            }
           >
             <s-option value="FIXED">Fixed fee</s-option>
             <s-option value="PERCENT">Percentage of the cart</s-option>
             <s-option value="TIERED">Price tiers by cart value</s-option>
           </s-select>
 
-          {s.rules.mode === "FIXED" && field("Fee", s.rules.fixedFee, (n) => setRules({ fixedFee: n }))}
+          {s.rules.mode === "FIXED" &&
+            field("Fee", s.rules.fixedFee, (n) => setRules({ fixedFee: n }))}
 
           {s.rules.mode === "PERCENT" &&
-            field("Percentage of the cart subtotal", s.rules.percent, (n) => setRules({ percent: n }), { suffix: "%" })}
+            field(
+              "Percentage of the cart subtotal",
+              s.rules.percent,
+              (n) => setRules({ percent: n }),
+              { suffix: "%" },
+            )}
 
           {s.rules.mode === "TIERED" && (
             <s-stack direction="block" gap="small-200">
               <s-text color="subdued">
-                Each tier applies from its cart value up to the next tier. Use a fixed fee or a percentage per tier.
+                Each tier applies from its cart value up to the next tier. Use a
+                fixed fee or a percentage per tier.
               </s-text>
               {s.rules.tiers.map((t, i) => (
-                <s-grid key={i} gridTemplateColumns="1fr 1fr 1fr auto" gap="small-200" alignItems="end">
-                  {field(`Tier ${i + 1}: from cart value`, t.from, (n) => setTier(i, { from: n }))}
+                <s-grid
+                  key={i}
+                  gridTemplateColumns="1fr 1fr 1fr auto"
+                  gap="small-200"
+                  alignItems="end"
+                >
+                  {field(`Tier ${i + 1}: from cart value`, t.from, (n) =>
+                    setTier(i, { from: n }),
+                  )}
                   <s-select
                     label="Fee type"
                     value={t.type}
-                    onChange={(e) => setTier(i, { type: e.currentTarget.value as Tier["type"] })}
+                    onChange={(e) =>
+                      setTier(i, {
+                        type: e.currentTarget.value as Tier["type"],
+                      })
+                    }
                   >
                     <s-option value="FIXED">Fixed</s-option>
                     <s-option value="PERCENT">Percentage</s-option>
@@ -359,7 +526,11 @@ export default function SettingsPage() {
                     variant="tertiary"
                     tone="critical"
                     disabled={s.rules.tiers.length <= 1}
-                    onClick={() => setRules({ tiers: s.rules.tiers.filter((_, j) => j !== i) })}
+                    onClick={() =>
+                      setRules({
+                        tiers: s.rules.tiers.filter((_, j) => j !== i),
+                      })
+                    }
                   >
                     Remove
                   </s-button>
@@ -369,7 +540,14 @@ export default function SettingsPage() {
                 onClick={() => {
                   const last = s.rules.tiers.at(-1);
                   setRules({
-                    tiers: [...s.rules.tiers, { from: (last?.from ?? 0) + 100 * scale, type: "FIXED", value: last?.value ?? 1 }],
+                    tiers: [
+                      ...s.rules.tiers,
+                      {
+                        from: (last?.from ?? 0) + 100 * scale,
+                        type: "FIXED",
+                        value: last?.value ?? 1,
+                      },
+                    ],
                   });
                 }}
                 disabled={s.rules.tiers.length >= 20}
@@ -381,43 +559,79 @@ export default function SettingsPage() {
 
           {usesPercent && (
             <s-grid gridTemplateColumns="1fr 1fr" gap="base">
-              {field("Minimum fee", s.rules.minFee, (n) => setRules({ minFee: n }), {
-                details: "A percentage fee is never lower than this.",
-              })}
-              {field("Maximum fee", s.rules.maxFee, (n) => setRules({ maxFee: n }), {
-                details: "…and never higher than this.",
-              })}
+              {field(
+                "Minimum fee",
+                s.rules.minFee,
+                (n) => setRules({ minFee: n }),
+                {
+                  details: "A percentage fee is never lower than this.",
+                },
+              )}
+              {field(
+                "Maximum fee",
+                s.rules.maxFee,
+                (n) => setRules({ maxFee: n }),
+                {
+                  details: "…and never higher than this.",
+                },
+              )}
             </s-grid>
           )}
 
-          {field("Only offer from a cart value of", s.rules.minSubtotal, (n) => setRules({ minSubtotal: n }), {
-            details: "0 = always offer it.",
-          })}
+          {field(
+            "Only offer from a cart value of",
+            s.rules.minSubtotal,
+            (n) => setRules({ minSubtotal: n }),
+            {
+              details: "0 = always offer it.",
+            },
+          )}
         </s-stack>
       </s-section>
 
-      <MarketPricesSection
-        value={s.marketPrices}
-        onChange={(marketPrices) => setS({ ...s, marketPrices })}
-      />
+      {loaded.features.marketPrices ? (
+        <MarketPricesSection
+          value={s.marketPrices}
+          onChange={(marketPrices) => setS({ ...s, marketPrices })}
+        />
+      ) : (
+        <s-section heading="Prices by market (optional)">
+          <UpgradeNotice feature="marketPrices">
+            Charge a fixed fee in a market&apos;s own currency — for example
+            €2.99 in Europe — instead of your pricing converted.
+          </UpgradeNotice>
+        </s-section>
+      )}
 
       <s-section heading="Exact pricing (Shopify Plus)">
         <s-stack direction="block" gap="base">
-          {loaded.plus ? (
+          {loaded.plus && !loaded.features.exactPricing ? (
+            <UpgradeNotice feature="exactPricing">
+              Charge customers exactly the calculated percentage fee, and let
+              them add or remove protection inside checkout. Both need a Shopify
+              Plus store — yours is one.
+            </UpgradeNotice>
+          ) : loaded.plus ? (
             <>
-              <ScopeGate scopes={["write_cart_transforms"]} what="adjust cart prices">
+              <ScopeGate
+                scopes={["write_cart_transforms"]}
+                what="adjust cart prices"
+              >
                 <s-checkbox
                   label="Charge the exact percentage fee"
                   details="Uses a cart transform so customers pay exactly the calculated fee instead of the nearest price point. Fixed fees and market prices are already exact."
                   checked={s.exactPricing}
-                  onChange={(e) => setS({ ...s, exactPricing: e.currentTarget.checked })}
+                  onChange={(e) =>
+                    setS({ ...s, exactPricing: e.currentTarget.checked })
+                  }
                 />
               </ScopeGate>
             </>
           ) : (
             <s-paragraph>
-              On Shopify Plus, SafeShip can charge the exact percentage fee instead of the nearest of its price points
-              (always within about 1.5%). Shopify only allows this on Plus.
+              On Shopify Plus, SafeShip can charge the exact percentage fee
+              instead of the nearest of its price points (always within about
+              1.5%). Shopify only allows this on Plus.
             </s-paragraph>
           )}
           <s-text type="strong">Checkout toggle</s-text>
@@ -434,15 +648,28 @@ export default function SettingsPage() {
           <s-select
             label="Protection covers"
             value={s.coverage.mode}
-            onChange={(e) => setS({ ...s, coverage: { ...s.coverage, mode: e.currentTarget.value as CoverageMode } })}
+            onChange={(e) =>
+              setS({
+                ...s,
+                coverage: {
+                  ...s.coverage,
+                  mode: e.currentTarget.value as CoverageMode,
+                },
+              })
+            }
           >
             <s-option value="ALL">All products that ship</s-option>
-            <s-option value="ONLY">Only products that match the rules below</s-option>
-            <s-option value="EXCEPT">All products that ship, except those that match the rules below</s-option>
+            <s-option value="ONLY">
+              Only products that match the rules below
+            </s-option>
+            <s-option value="EXCEPT">
+              All products that ship, except those that match the rules below
+            </s-option>
           </s-select>
           <s-text color="subdued">
-            Products that don&apos;t need shipping (digital products, services) and gift cards are never covered. The
-            fee is calculated on covered products only, and a cart with none isn&apos;t offered protection.
+            Products that don&apos;t need shipping (digital products, services)
+            and gift cards are never covered. The fee is calculated on covered
+            products only, and a cart with none isn&apos;t offered protection.
           </s-text>
           {s.coverage.mode !== "ALL" && (
             <s-stack direction="block" gap="base">
@@ -466,11 +693,17 @@ export default function SettingsPage() {
                 onInput={(e) => setCovVendors(e.currentTarget.value)}
               />
               <s-stack direction="block" gap="small-200">
-                <s-text>Specific products ({s.coverage.productIds.length})</s-text>
+                <s-text>
+                  Specific products ({s.coverage.productIds.length})
+                </s-text>
                 {s.coverage.productIds.length > 0 && (
                   <s-stack direction="inline" gap="small-200">
                     {s.coverage.productIds.map((id) => (
-                      <s-clickable-chip key={id} removable onRemove={() => removeProduct(id)}>
+                      <s-clickable-chip
+                        key={id}
+                        removable
+                        onRemove={() => removeProduct(id)}
+                      >
                         {s.coverageProductTitles[String(id)] ?? `Product ${id}`}
                       </s-clickable-chip>
                     ))}
@@ -481,8 +714,9 @@ export default function SettingsPage() {
                 </s-stack>
               </s-stack>
               <s-text color="subdued">
-                Collections can&apos;t be used: the cart doesn&apos;t know which collections a product is in. Tag the
-                products instead (bulk-edit in Products, or Shopify Flow).
+                Collections can&apos;t be used: the cart doesn&apos;t know which
+                collections a product is in. Tag the products instead (bulk-edit
+                in Products, or Shopify Flow).
               </s-text>
             </s-stack>
           )}
@@ -511,18 +745,23 @@ export default function SettingsPage() {
                   return (
                     <s-table-row key={v}>
                       <s-table-cell>{money(v)}</s-table-cell>
-                      <s-table-cell>{c ? money(c.price) : "Not offered"}</s-table-cell>
+                      <s-table-cell>
+                        {c ? money(c.price) : "Not offered"}
+                      </s-table-cell>
                     </s-table-row>
                   );
                 })}
               </s-table-body>
             </s-table>
-            {field("Try a cart value", Number(tryValue), (n) => setTryValue(Number.isFinite(n) ? String(n) : ""))}
+            {field("Try a cart value", Number(tryValue), (n) =>
+              setTryValue(Number.isFinite(n) ? String(n) : ""),
+            )}
             {usesPercent && (
               <s-text color="subdued">
-                Percentage fees are charged at the nearest of {ladder.length} price points (within about 1.5%).
-                Shopify only lets Plus stores set a cart line&apos;s price directly, so the app keeps one variant per
-                price point on the protection product.
+                Percentage fees are charged at the nearest of {ladder.length}{" "}
+                price points (within about 1.5%). Shopify only lets Plus stores
+                set a cart line&apos;s price directly, so the app keeps one
+                variant per price point on the protection product.
               </s-text>
             )}
           </s-stack>
@@ -543,19 +782,23 @@ export default function SettingsPage() {
             onInput={(e) => setCountries(e.currentTarget.value)}
           />
           <s-stack direction="inline" gap="small-200">
-            <s-button onClick={() => setCountries(OPT_IN_REQUIRED_COUNTRIES.join(", "))}>
+            <s-button
+              onClick={() => setCountries(OPT_IN_REQUIRED_COUNTRIES.join(", "))}
+            >
               Reset to EU, EEA, UK and Switzerland
             </s-button>
           </s-stack>
           {missing.length > 0 && (
             <s-banner tone="warning" heading="Check with your legal adviser">
-              Customers in {missing.join(", ")} would see protection already added. Consumer law there generally
-              requires paid extras to be chosen actively.
+              Customers in {missing.join(", ")} would see protection already
+              added. Consumer law there generally requires paid extras to be
+              chosen actively.
             </s-banner>
           )}
           <s-text color="subdued">
-            Customers whose country isn&apos;t known (some themes don&apos;t set it) follow the automatic setting above.
-            Their choice is remembered on the cart and saved on the order.
+            Customers whose country isn&apos;t known (some themes don&apos;t set
+            it) follow the automatic setting above. Their choice is remembered
+            on the cart and saved on the order.
           </s-text>
         </s-stack>
       </s-section>
@@ -563,26 +806,39 @@ export default function SettingsPage() {
       <s-section heading="Widget text">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Leave empty to use the built-in text, shown in the customer&apos;s language (English, German, French,
-            Spanish, Italian, Dutch, Hindi). Text you enter here is shown in every language.
+            Leave empty to use the built-in text, shown in the customer&apos;s
+            language (English, German, French, Spanish, Italian, Dutch, Hindi).
+            Text you enter here is shown in every language.
           </s-paragraph>
           <s-text-field
             label="Title"
             value={s.copy.title}
             placeholder="Shipping protection"
-            onInput={(e) => setS({ ...s, copy: { ...s.copy, title: e.currentTarget.value } })}
+            onInput={(e) =>
+              setS({ ...s, copy: { ...s.copy, title: e.currentTarget.value } })
+            }
           />
           <s-text-field
             label="Description"
             value={s.copy.description}
             placeholder="Cover your order against loss, theft or damage in transit."
-            onInput={(e) => setS({ ...s, copy: { ...s.copy, description: e.currentTarget.value } })}
+            onInput={(e) =>
+              setS({
+                ...s,
+                copy: { ...s.copy, description: e.currentTarget.value },
+              })
+            }
           />
           <s-url-field
             label="“Learn more” link (optional)"
             value={s.copy.learnMoreUrl}
             details="Your page explaining what's covered and how to make a claim."
-            onInput={(e) => setS({ ...s, copy: { ...s.copy, learnMoreUrl: e.currentTarget.value } })}
+            onInput={(e) =>
+              setS({
+                ...s,
+                copy: { ...s.copy, learnMoreUrl: e.currentTarget.value },
+              })
+            }
           />
         </s-stack>
       </s-section>
@@ -607,32 +863,57 @@ export default function SettingsPage() {
           {s.claims.enabled && (
             <s-stack direction="block" gap="base">
               <s-paragraph>
-                Claims page: <s-link href={loaded.portalUrl} target="_blank">{loaded.portalUrl}</s-link>. Link to it
-                from your footer menu, shipping policy and order emails.
+                Claims page:{" "}
+                <s-link href={loaded.portalUrl} target="_blank">
+                  {loaded.portalUrl}
+                </s-link>
+                . Link to it from your footer menu, shipping policy and order
+                emails.
               </s-paragraph>
               {(!loaded.emailReady || !loaded.uploadsReady) && (
-                <s-banner tone="warning" heading="Not fully set up on the app's side">
-                  {!loaded.emailReady && "Claim emails aren't being sent yet (no email service configured). "}
-                  {!loaded.uploadsReady && "Customers can't upload photos yet (no file storage configured)."}
+                <s-banner
+                  tone="warning"
+                  heading="Not fully set up on the app's side"
+                >
+                  {!loaded.emailReady &&
+                    "Claim emails aren't being sent yet (no email service configured). "}
+                  {!loaded.uploadsReady &&
+                    "Customers can't upload photos yet (no file storage configured)."}
                 </s-banner>
               )}
-              <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
+              <s-grid
+                gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))"
+                gap="base"
+              >
                 <s-number-field
                   label="Claim window (days)"
                   value={String(s.claims.windowDays)}
                   min={1}
                   max={365}
                   step={1}
-                  onInput={(e) => setClaims({ windowDays: Number(e.currentTarget.value) || 0 })}
+                  onInput={(e) =>
+                    setClaims({
+                      windowDays: Number(e.currentTarget.value) || 0,
+                    })
+                  }
                 />
-                <s-select
-                  label="Window starts"
-                  value={s.claims.windowFrom}
-                  onChange={(e) => setClaims({ windowFrom: e.currentTarget.value as ClaimSettings["windowFrom"] })}
-                >
-                  <s-option value="SHIPPED">When the order ships</s-option>
-                  <s-option value="DELIVERED">When it&apos;s delivered (or ships, if never delivered)</s-option>
-                </s-select>
+                {loaded.features.claimRules && (
+                  <s-select
+                    label="Window starts"
+                    value={s.claims.windowFrom}
+                    onChange={(e) =>
+                      setClaims({
+                        windowFrom: e.currentTarget
+                          .value as ClaimSettings["windowFrom"],
+                      })
+                    }
+                  >
+                    <s-option value="SHIPPED">When the order ships</s-option>
+                    <s-option value="DELIVERED">
+                      When it&apos;s delivered (or ships, if never delivered)
+                    </s-option>
+                  </s-select>
+                )}
                 <s-number-field
                   label="Report lost after (days in transit)"
                   details="0 = any time. Stops “lost” claims for packages that are just slow."
@@ -640,7 +921,11 @@ export default function SettingsPage() {
                   min={0}
                   max={90}
                   step={1}
-                  onInput={(e) => setClaims({ lostAfterDays: Number(e.currentTarget.value) || 0 })}
+                  onInput={(e) =>
+                    setClaims({
+                      lostAfterDays: Number(e.currentTarget.value) || 0,
+                    })
+                  }
                 />
                 <s-number-field
                   label="Claims per order"
@@ -649,56 +934,114 @@ export default function SettingsPage() {
                   min={1}
                   max={10}
                   step={1}
-                  onInput={(e) => setClaims({ maxPerOrder: Number(e.currentTarget.value) || 1 })}
+                  onInput={(e) =>
+                    setClaims({
+                      maxPerOrder: Number(e.currentTarget.value) || 1,
+                    })
+                  }
                 />
               </s-grid>
               <s-checkbox
                 label="Only orders that bought shipping protection can be claimed"
                 checked={s.claims.requireProtection}
-                onChange={(e) => setClaims({ requireProtection: e.currentTarget.checked })}
+                onChange={(e) =>
+                  setClaims({ requireProtection: e.currentTarget.checked })
+                }
               />
               <s-checkbox
                 label="Require a photo for damage claims"
                 checked={s.claims.photosForDamage}
-                onChange={(e) => setClaims({ photosForDamage: e.currentTarget.checked })}
+                onChange={(e) =>
+                  setClaims({ photosForDamage: e.currentTarget.checked })
+                }
               />
-              <s-checkbox
-                label="Require a supporting document for lost and stolen claims"
-                details="For example a police report or the carrier's reply. Customers can upload photos or PDFs."
-                checked={s.claims.evidenceForLostStolen}
-                onChange={(e) => setClaims({ evidenceForLostStolen: e.currentTarget.checked })}
-              />
-              <s-heading>Limits and review flags</s-heading>
-              <s-text color="subdued">
-                Limits stop a claim being filed online (the customer is asked to contact you; you can still create
-                it under Claims). Flags never block anything — they mark claims to look at more closely.
-              </s-text>
-              <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
-                {field("Most that can be claimed per order", s.claims.maxValuePerOrder, (n) => setClaims({ maxValuePerOrder: Number.isFinite(n) ? n : 0 }), {
-                  details: "All claims on the order together. 0 = no limit.",
-                })}
-                {field("Most one customer can claim in 12 months", s.claims.maxValuePerCustomer, (n) => setClaims({ maxValuePerCustomer: Number.isFinite(n) ? n : 0 }), {
-                  details: "By email. 0 = no limit.",
-                })}
-                {field("Flag claims worth at least", s.claims.highValue, (n) => setClaims({ highValue: Number.isFinite(n) ? n : 0 }), {
-                  details: "0 = off.",
-                })}
-                <s-number-field
-                  label="Flag repeat claims from"
-                  details="Claims in 12 months from the same customer or shipping address, this one included."
-                  value={String(s.claims.repeatThreshold)}
-                  min={2}
-                  max={20}
-                  step={1}
-                  suffix="claims"
-                  onInput={(e) => setClaims({ repeatThreshold: Number(e.currentTarget.value) || 2 })}
+              {loaded.features.claimRules && (
+                <s-checkbox
+                  label="Require a supporting document for lost and stolen claims"
+                  details="For example a police report or the carrier's reply. Customers can upload photos or PDFs."
+                  checked={s.claims.evidenceForLostStolen}
+                  onChange={(e) =>
+                    setClaims({
+                      evidenceForLostStolen: e.currentTarget.checked,
+                    })
+                  }
                 />
-              </s-grid>
+              )}
+              {loaded.features.claimRules ? (
+                <>
+                  <s-heading>Limits and review flags</s-heading>
+                  <s-text color="subdued">
+                    Limits stop a claim being filed online (the customer is
+                    asked to contact you; you can still create it under Claims).
+                    Flags never block anything — they mark claims to look at
+                    more closely.
+                  </s-text>
+                  <s-grid
+                    gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))"
+                    gap="base"
+                  >
+                    {field(
+                      "Most that can be claimed per order",
+                      s.claims.maxValuePerOrder,
+                      (n) =>
+                        setClaims({
+                          maxValuePerOrder: Number.isFinite(n) ? n : 0,
+                        }),
+                      {
+                        details:
+                          "All claims on the order together. 0 = no limit.",
+                      },
+                    )}
+                    {field(
+                      "Most one customer can claim in 12 months",
+                      s.claims.maxValuePerCustomer,
+                      (n) =>
+                        setClaims({
+                          maxValuePerCustomer: Number.isFinite(n) ? n : 0,
+                        }),
+                      {
+                        details: "By email. 0 = no limit.",
+                      },
+                    )}
+                    {field(
+                      "Flag claims worth at least",
+                      s.claims.highValue,
+                      (n) =>
+                        setClaims({ highValue: Number.isFinite(n) ? n : 0 }),
+                      {
+                        details: "0 = off.",
+                      },
+                    )}
+                    <s-number-field
+                      label="Flag repeat claims from"
+                      details="Claims in 12 months from the same customer or shipping address, this one included."
+                      value={String(s.claims.repeatThreshold)}
+                      min={2}
+                      max={20}
+                      step={1}
+                      suffix="claims"
+                      onInput={(e) =>
+                        setClaims({
+                          repeatThreshold: Number(e.currentTarget.value) || 2,
+                        })
+                      }
+                    />
+                  </s-grid>
+                </>
+              ) : (
+                <UpgradeNotice feature="claimRules">
+                  Set limits per order and per customer, require documents for
+                  lost or stolen packages, start the claim window at delivery,
+                  and flag repeat or high-value claims for a closer look.
+                </UpgradeNotice>
+              )}
               <s-email-field
                 label="Send new-claim emails to"
                 placeholder="Your store's email"
                 value={s.claims.notifyEmail}
-                onInput={(e) => setClaims({ notifyEmail: e.currentTarget.value })}
+                onInput={(e) =>
+                  setClaims({ notifyEmail: e.currentTarget.value })
+                }
               />
               <s-text-area
                 label="Policy shown on the claims page (optional)"
@@ -713,26 +1056,63 @@ export default function SettingsPage() {
       </s-section>
 
       <s-section heading="Tracking" id="tracking">
-        <s-stack direction="block" gap="base">
-          <s-paragraph>
-            Packages of protected orders are followed on the <s-link href="/app/shipments">Shipments</s-link> page.
-            These rules decide when one is flagged for you to check. Set any of them to 0 to turn it off.
-          </s-paragraph>
-          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))" gap="base">
-            {days("Not picked up after", s.tracking.noScanDays, 60, (n) => setTracking({ noScanDays: n }), "Fulfilled, but no carrier scan yet.")}
-            {days("Stalled after", s.tracking.staleDays, 60, (n) => setTracking({ staleDays: n }), "In transit with no carrier update.")}
-            {days("Late after", s.tracking.lateDays, 60, (n) => setTracking({ lateDays: n }), "Days past the carrier's estimated delivery.")}
-            {days("Possibly lost after", s.tracking.lostDays, 180, (n) => setTracking({ lostDays: n }), "Days since shipping without delivery.")}
-          </s-grid>
-        </s-stack>
+        {!loaded.features.tracking ? (
+          <UpgradeNotice feature="tracking">
+            Follow every protected package and get flags for packages that
+            weren&apos;t picked up, stalled, are late or may be lost.
+          </UpgradeNotice>
+        ) : (
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Packages of protected orders are followed on the{" "}
+              <s-link href="/app/shipments">Shipments</s-link> page. These rules
+              decide when one is flagged for you to check. Set any of them to 0
+              to turn it off.
+            </s-paragraph>
+            <s-grid
+              gridTemplateColumns="repeat(auto-fit, minmax(200px, 1fr))"
+              gap="base"
+            >
+              {days(
+                "Not picked up after",
+                s.tracking.noScanDays,
+                60,
+                (n) => setTracking({ noScanDays: n }),
+                "Fulfilled, but no carrier scan yet.",
+              )}
+              {days(
+                "Stalled after",
+                s.tracking.staleDays,
+                60,
+                (n) => setTracking({ staleDays: n }),
+                "In transit with no carrier update.",
+              )}
+              {days(
+                "Late after",
+                s.tracking.lateDays,
+                60,
+                (n) => setTracking({ lateDays: n }),
+                "Days past the carrier's estimated delivery.",
+              )}
+              {days(
+                "Possibly lost after",
+                s.tracking.lostDays,
+                180,
+                (n) => setTracking({ lostDays: n }),
+                "Days since shipping without delivery.",
+              )}
+            </s-grid>
+          </s-stack>
+        )}
       </s-section>
 
       {loaded.configured && (
         <s-section heading="Remove from store">
           <s-stack direction="block" gap="base">
             <s-paragraph>
-              Deletes the Shipping protection product and the checkout rule from your store. Do this before
-              uninstalling the app — afterwards the app can&apos;t remove them for you. Your settings here are
+              Deletes the Shipping protection product and the checkout rule from
+              your store. Do this before uninstalling the app — afterwards the
+              app can&apos;t remove them for you. Your settings here are
               cleared; past orders keep their protection details.
             </s-paragraph>
             <s-stack direction="inline" gap="small-200">
@@ -743,16 +1123,24 @@ export default function SettingsPage() {
                     variant="primary"
                     {...(busy ? { loading: true } : {})}
                     onClick={() => {
-                      fetcher.submit({ intent: "remove" } as never, { method: "POST", encType: "application/json" });
+                      fetcher.submit({ intent: "remove" } as never, {
+                        method: "POST",
+                        encType: "application/json",
+                      });
                       setConfirmRemove(false);
                     }}
                   >
                     Yes, remove it
                   </s-button>
-                  <s-button onClick={() => setConfirmRemove(false)}>Cancel</s-button>
+                  <s-button onClick={() => setConfirmRemove(false)}>
+                    Cancel
+                  </s-button>
                 </>
               ) : (
-                <s-button tone="critical" onClick={() => setConfirmRemove(true)}>
+                <s-button
+                  tone="critical"
+                  onClick={() => setConfirmRemove(true)}
+                >
                   Remove from store
                 </s-button>
               )}
@@ -765,7 +1153,15 @@ export default function SettingsPage() {
 }
 
 /** Children only once the optional scopes are granted; otherwise an Allow button. */
-function ScopeGate({ scopes, what, children }: { scopes: string[]; what: string; children: React.ReactNode }) {
+function ScopeGate({
+  scopes,
+  what,
+  children,
+}: {
+  scopes: string[];
+  what: string;
+  children: React.ReactNode;
+}) {
   const shopify = useAppBridge();
   const [granted, setGranted] = useState<string[] | null>(null);
   useEffect(() => {
@@ -809,24 +1205,44 @@ function MarketPricesSection({
 }) {
   const fetcher = useFetcher<ActionResult>();
   const markets = fetcher.data?.ok ? (fetcher.data.markets ?? null) : null;
-  const error = fetcher.data && !fetcher.data.ok ? fetcher.data.errors[0] : null;
-  const load = () => fetcher.submit({ intent: "markets" } as never, { method: "POST", encType: "application/json" });
-  const set = (marketId: number, patch: Partial<Settings["marketPrices"][number]>) =>
-    onChange(value.map((m) => (m.marketId === marketId ? { ...m, ...patch } : m)));
-  const unused = (markets ?? []).filter((m) => !value.some((v) => v.marketId === m.id));
+  const error =
+    fetcher.data && !fetcher.data.ok ? fetcher.data.errors[0] : null;
+  const load = () =>
+    fetcher.submit({ intent: "markets" } as never, {
+      method: "POST",
+      encType: "application/json",
+    });
+  const set = (
+    marketId: number,
+    patch: Partial<Settings["marketPrices"][number]>,
+  ) =>
+    onChange(
+      value.map((m) => (m.marketId === marketId ? { ...m, ...patch } : m)),
+    );
+  const unused = (markets ?? []).filter(
+    (m) => !value.some((v) => v.marketId === m.id),
+  );
 
   return (
     <s-section heading="Prices by market (optional)">
       <s-stack direction="block" gap="base">
         <s-paragraph>
-          Charge a fixed fee in a market&apos;s own currency — for example €2.99 in Europe — instead of your pricing
-          above converted. The fee is set in that market&apos;s price list in Shopify Markets.
+          Charge a fixed fee in a market&apos;s own currency — for example €2.99
+          in Europe — instead of your pricing above converted. The fee is set in
+          that market&apos;s price list in Shopify Markets.
         </s-paragraph>
         {value.map((m) => (
-          <s-grid key={m.marketId} gridTemplateColumns="2fr 1fr auto" gap="small-200" alignItems="end">
+          <s-grid
+            key={m.marketId}
+            gridTemplateColumns="2fr 1fr auto"
+            gap="small-200"
+            alignItems="end"
+          >
             <s-text>
               {m.name || `Market ${m.marketId}`}
-              {markets && !markets.some((x) => x.id === m.marketId) ? " (not found — remove it)" : ""}
+              {markets && !markets.some((x) => x.id === m.marketId)
+                ? " (not found — remove it)"
+                : ""}
             </s-text>
             <s-number-field
               label="Fee"
@@ -834,12 +1250,16 @@ function MarketPricesSection({
               step={0.01}
               suffix={m.currency}
               value={Number.isFinite(m.amount) ? String(m.amount) : ""}
-              onInput={(e) => set(m.marketId, { amount: Number(e.currentTarget.value) })}
+              onInput={(e) =>
+                set(m.marketId, { amount: Number(e.currentTarget.value) })
+              }
             />
             <s-button
               variant="tertiary"
               tone="critical"
-              onClick={() => onChange(value.filter((x) => x.marketId !== m.marketId))}
+              onClick={() =>
+                onChange(value.filter((x) => x.marketId !== m.marketId))
+              }
             >
               Remove
             </s-button>
@@ -848,19 +1268,32 @@ function MarketPricesSection({
         <ScopeGate scopes={["read_markets"]} what="read your markets">
           {markets === null ? (
             <s-stack direction="inline" gap="small-200">
-              <s-button onClick={load} {...(fetcher.state !== "idle" ? { loading: true } : {})}>
+              <s-button
+                onClick={load}
+                {...(fetcher.state !== "idle" ? { loading: true } : {})}
+              >
                 {value.length ? "Add another market" : "Choose markets"}
               </s-button>
             </s-stack>
           ) : unused.length === 0 ? (
-            <s-text color="subdued">All your active markets have a price.</s-text>
+            <s-text color="subdued">
+              All your active markets have a price.
+            </s-text>
           ) : (
             <s-stack direction="inline" gap="small-200">
               {unused.slice(0, MAX_MARKET_PRICES - value.length).map((m) => (
                 <s-button
                   key={m.id}
                   onClick={() =>
-                    onChange([...value, { marketId: m.id, name: m.name, currency: m.currency, amount: NaN }])
+                    onChange([
+                      ...value,
+                      {
+                        marketId: m.id,
+                        name: m.name,
+                        currency: m.currency,
+                        amount: NaN,
+                      },
+                    ])
                   }
                 >
                   + {m.name} ({m.currency})
@@ -871,8 +1304,9 @@ function MarketPricesSection({
         </ScopeGate>
         {error && <s-banner tone="critical">{error}</s-banner>}
         <s-text color="subdued">
-          Customers in a market with a price here pay exactly that, whatever the cart value — protection is still only
-          offered from your minimum cart value. Save to apply.
+          Customers in a market with a price here pay exactly that, whatever the
+          cart value — protection is still only offered from your minimum cart
+          value. Save to apply.
         </s-text>
       </s-stack>
     </s-section>
@@ -880,7 +1314,11 @@ function MarketPricesSection({
 }
 
 /** "How to set up SafeShip": open until the first save, then folded away. */
-function SetupGuide({ steps }: { steps: { done: boolean; title: string; body: React.ReactNode }[] }) {
+function SetupGuide({
+  steps,
+}: {
+  steps: { done: boolean; title: string; body: React.ReactNode }[];
+}) {
   const left = steps.filter((x) => !x.done).length;
   const allSet = steps.slice(0, 3).every((x) => x.done);
   return (
@@ -888,14 +1326,22 @@ function SetupGuide({ steps }: { steps: { done: boolean; title: string; body: Re
       <details open={!allSet}>
         <summary style={{ cursor: "pointer", padding: "4px 0" }}>
           <s-text type="strong">How to set up SafeShip</s-text>{" "}
-          <s-text color="subdued">{allSet ? "— you're live" : `— ${left} step${left === 1 ? "" : "s"} to go`}</s-text>
+          <s-text color="subdued">
+            {allSet
+              ? "— you're live"
+              : `— ${left} step${left === 1 ? "" : "s"} to go`}
+          </s-text>
         </summary>
         <s-stack direction="block" gap="base">
           <s-ordered-list>
             {steps.map((x) => (
               <s-list-item key={x.title}>
                 <s-stack direction="block" gap="small-100">
-                  <s-stack direction="inline" gap="small-200" alignItems="center">
+                  <s-stack
+                    direction="inline"
+                    gap="small-200"
+                    alignItems="center"
+                  >
                     <s-text type="strong">{x.title}</s-text>
                     {x.done && <s-badge tone="success">Done</s-badge>}
                   </s-stack>
@@ -905,8 +1351,9 @@ function SetupGuide({ steps }: { steps: { done: boolean; title: string; body: Re
             ))}
           </s-ordered-list>
           <s-text color="subdued">
-            Good to know: everything you save here is pushed into Shopify, so protection keeps working at checkout even
-            if this app is ever unavailable. Settings are explained next to each field.
+            Good to know: everything you save here is pushed into Shopify, so
+            protection keeps working at checkout even if this app is ever
+            unavailable. Settings are explained next to each field.
           </s-text>
         </s-stack>
       </details>

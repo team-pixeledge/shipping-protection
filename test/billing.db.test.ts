@@ -1,16 +1,46 @@
 // Usage billing against a real Postgres and a fake Shopify. Skipped unless
 // TEST_DATABASE_URL is set (see resolutions.db.test.ts).
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { cycleCost, decideCharge, PLAN } from "../app/lib/plan";
+import {
+  cycleCost,
+  decideCharge,
+  hasFeature,
+  planFromBillingName,
+  PLANS,
+  PLAN_ORDER,
+} from "../app/lib/plan";
+
+const PLAN = PLANS.GROWTH;
 
 describe("plan maths", () => {
   test("free allowance, per-order price, cap", () => {
-    expect(decideCharge(0)).toBe("FREE");
-    expect(decideCharge(PLAN.freeOrders - 1)).toBe("FREE");
-    expect(decideCharge(PLAN.freeOrders)).toBe("CHARGE");
-    expect(cycleCost(25)).toBe(0);
-    expect(cycleCost(100)).toBeCloseTo(2.5);
-    expect(cycleCost(1_000_000)).toBe(PLAN.cap);
+    expect(decideCharge(PLAN, 0)).toBe("FREE");
+    expect(decideCharge(PLAN, PLAN.freeOrders - 1)).toBe("FREE");
+    expect(decideCharge(PLAN, PLAN.freeOrders)).toBe("CHARGE");
+    expect(cycleCost(PLAN, 25)).toBe(0);
+    expect(cycleCost(PLAN, 100)).toBeCloseTo(2.5);
+    expect(cycleCost(PLAN, 1_000_000)).toBe(PLAN.cap);
+  });
+
+  test("higher plans add features and never lose one", () => {
+    for (let i = 1; i < PLAN_ORDER.length; i++) {
+      const lower = PLANS[PLAN_ORDER[i - 1]].features;
+      expect(
+        lower.every((f) => PLANS[PLAN_ORDER[i]].features.includes(f)),
+      ).toBe(true);
+    }
+    expect(hasFeature("STARTER", "tracking")).toBe(false);
+    expect(hasFeature("GROWTH", "tracking")).toBe(true);
+    expect(hasFeature("GROWTH", "marketPrices")).toBe(false);
+    expect(hasFeature("PRO", "checkoutToggle")).toBe(true);
+    expect(hasFeature(null, "risk")).toBe(false);
+  });
+
+  test("subscriptions map back to plans, including the plan from before tiers", () => {
+    for (const id of PLAN_ORDER)
+      expect(planFromBillingName(PLANS[id].billingName)).toBe(id);
+    expect(planFromBillingName("SafeShip Usage")).toBe("GROWTH");
+    expect(planFromBillingName("Something else")).toBeNull();
   });
 });
 
@@ -36,7 +66,7 @@ describe.skipIf(!url)("usage billing (database)", () => {
 
   /** A fake Admin API: one active usage subscription; records usage mutations. */
   function fakeAdmin(
-    opts: { plan?: boolean; used?: number; cap?: number; refuse?: string } = {},
+    opts: { plan?: boolean; used?: number; cap?: number; refuse?: string; name?: string } = {},
   ) {
     const records: { key: string; amount: string }[] = [];
     const admin = {
@@ -51,7 +81,7 @@ describe.skipIf(!url)("usage billing (database)", () => {
               : [
                   {
                     id: "gid://shopify/AppSubscription/1",
-                    name: PLAN.name,
+                    name: opts.name ?? PLAN.billingName,
                     status: "ACTIVE",
                     test: true,
                     currentPeriodEnd: END,
@@ -204,5 +234,37 @@ describe.skipIf(!url)("usage billing (database)", () => {
         })
       )?.status,
     ).toBe("CHARGED");
+  });
+
+  test("each plan charges its own price", async () => {
+    await prisma.usageCharge.createMany({
+      data: Array.from({ length: 50 }, (_, i) => ({
+        shop: SHOP,
+        orderId: `old-${i}`,
+        orderName: `#${i}`,
+        status: "FREE",
+        amount: 0,
+        periodEnd: new Date(END),
+      })),
+    });
+    const pro = fakeAdmin({ name: PLANS.PRO.billingName, cap: PLANS.PRO.cap });
+    await billing.billProtectedOrder(pro.admin, SHOP, {
+      id: "p1",
+      name: "#p1",
+    });
+    expect(pro.records).toEqual([
+      { key: "sp-order-p1", amount: PLANS.PRO.pricePerOrder.toFixed(2) },
+    ]);
+    const starter = fakeAdmin({
+      name: PLANS.STARTER.billingName,
+      cap: PLANS.STARTER.cap,
+    });
+    await billing.billProtectedOrder(starter.admin, SHOP, {
+      id: "s1",
+      name: "#s1",
+    });
+    expect(starter.records).toEqual([
+      { key: "sp-order-s1", amount: PLANS.STARTER.pricePerOrder.toFixed(2) },
+    ]);
   });
 });

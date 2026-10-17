@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import type {
+  ActionFunctionArgs,
+  HeadersFunction,
+  LoaderFunctionArgs,
+} from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -34,9 +38,36 @@ import {
   reviewPriority,
 } from "../lib/claims";
 import { refreshOrderShipments } from "../lib/tracking.server";
-import { SHIPMENT_FLAG_LABELS, STAGE_LABELS, STAGE_TONE, type ShipmentFlag, type Stage, type TrackingNumber } from "../lib/tracking";
-import { changeClaimStatus, ClaimConflict, messageCustomer } from "../lib/claims.server";
-import { clearStuck, refundPreview, resolveClaim, ResolutionError, type RefundPreview } from "../lib/resolutions.server";
+import { hasFeature, isPlanId, type FeatureKey } from "../lib/plan";
+import { gateFlags } from "../lib/gates";
+
+async function planHas(shop: string, f: FeatureKey) {
+  const row = await prisma.shop.findUnique({
+    where: { shop },
+    select: { plan: true },
+  });
+  return hasFeature(isPlanId(row?.plan) ? row!.plan : null, f);
+}
+import {
+  SHIPMENT_FLAG_LABELS,
+  STAGE_LABELS,
+  STAGE_TONE,
+  type ShipmentFlag,
+  type Stage,
+  type TrackingNumber,
+} from "../lib/tracking";
+import {
+  changeClaimStatus,
+  ClaimConflict,
+  messageCustomer,
+} from "../lib/claims.server";
+import {
+  clearStuck,
+  refundPreview,
+  resolveClaim,
+  ResolutionError,
+  type RefundPreview,
+} from "../lib/resolutions.server";
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
@@ -49,24 +80,39 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     },
   });
   if (!claim) throw new Response("Not found", { status: 404 });
-  const shopRow = await prisma.shop.findUniqueOrThrow({ where: { shop: session.shop } });
+  const shopRow = await prisma.shop.findUniqueOrThrow({
+    where: { shop: session.shop },
+  });
+  const plan = isPlanId(shopRow.plan) ? shopRow.plan : null;
+  const features = {
+    risk: hasFeature(plan, "risk"),
+    tracking: hasFeature(plan, "tracking"),
+  };
 
   // What a refund would be, shown before the merchant commits to it.
   let refund: RefundPreview | null = null;
   let refundError: string | null = null;
   if (claim.status === "APPROVED" && !claim.resolvedAt) {
     try {
-      refund = await refundPreview(admin, claim.orderId, claim.items as unknown as ClaimItem[]);
+      refund = await refundPreview(
+        admin,
+        claim.orderId,
+        claim.items as unknown as ClaimItem[],
+      );
     } catch (err) {
       refundError = err instanceof Error ? err.message : String(err);
     }
   }
-  const running = claim.resolutions.find((r) => r.id === claim.resolutionLock && r.status === "PROCESSING");
+  const running = claim.resolutions.find(
+    (r) => r.id === claim.resolutionLock && r.status === "PROCESSING",
+  );
   const appUrl = (process.env.SHOPIFY_APP_URL || "").replace(/\/$/, "");
-  const packages = await prisma.shipment.findMany({
-    where: { shop: session.shop, orderId: claim.orderId },
-    orderBy: { shippedAt: "asc" },
-  });
+  const packages = !features.tracking
+    ? []
+    : await prisma.shipment.findMany({
+        where: { shop: session.shop, orderId: claim.orderId },
+        orderBy: { shippedAt: "asc" },
+      });
   const otherClaims = await prisma.claim.findMany({
     where: { shop: session.shop, email: claim.email, id: { not: claim.id } },
     orderBy: { createdAt: "desc" },
@@ -88,7 +134,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       amount: Number(claim.amount),
       currency: claim.currency,
       protected: claim.protected,
-      flags: claim.flags,
+      flags: gateFlags(claim.flags, plan),
       dismissedFlags: claim.dismissedFlags,
       source: claim.source,
       shipments: claim.shipments as unknown as Shipment[],
@@ -96,6 +142,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       resolvedAt: claim.resolvedAt?.toISOString() ?? null,
     },
     shopCurrency: shopRow.currency,
+    features,
     packages: packages.map((p) => ({
       id: p.fulfillmentId,
       stage: p.stage as Stage,
@@ -107,11 +154,17 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       lastEventStatus: p.lastEventStatus,
       checkedAt: p.checkedAt.toISOString(),
       flags: p.flags as ShipmentFlag[],
-      claimed: p.lineItemIds.some((id) => (claim.items as unknown as ClaimItem[]).some((i) => i.lineItemId === id)),
+      claimed: p.lineItemIds.some((id) =>
+        (claim.items as unknown as ClaimItem[]).some(
+          (i) => i.lineItemId === id,
+        ),
+      ),
     })),
     refund,
     refundError,
-    running: running ? { stuck: Date.now() - running.createdAt.getTime() > 5 * 60_000 } : null,
+    running: running
+      ? { stuck: Date.now() - running.createdAt.getTime() > 5 * 60_000 }
+      : null,
     resolutions: claim.resolutions.map((r) => ({
       id: r.id,
       type: r.type as ResolutionKind,
@@ -125,11 +178,14 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       at: (r.completedAt ?? r.createdAt).toISOString(),
     })),
     files: claim.files.map((f) => {
-      const t = encodeURIComponent(signToken({ p: "file", shop: session.shop, id: f.id }));
+      const t = encodeURIComponent(
+        signToken({ p: "file", shop: session.shop, id: f.id }),
+      );
       return {
         id: f.id,
         name: f.name,
-        image: f.contentType.startsWith("image/") && !/hei[cf]/.test(f.contentType),
+        image:
+          f.contentType.startsWith("image/") && !/hei[cf]/.test(f.contentType),
         size: f.size,
         url: `${appUrl}/claim-files/${f.id}?t=${t}`,
         download: `${appUrl}/claim-files/${f.id}?t=${t}&download=1`,
@@ -144,26 +200,38 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       internal: e.internal,
       at: e.createdAt.toISOString(),
     })),
-    otherClaims: otherClaims.map((c) => ({ ...c, status: c.status as ClaimStatus })),
+    otherClaims: otherClaims.map((c) => ({
+      ...c,
+      status: c.status as ClaimStatus,
+    })),
   };
 };
 
 type ActionResult = { ok: true; intent: string } | { ok: false; error: string };
 
-export const action = async ({ request, params }: ActionFunctionArgs): Promise<ActionResult> => {
+export const action = async ({
+  request,
+  params,
+}: ActionFunctionArgs): Promise<ActionResult> => {
   const { session, admin } = await authenticate.admin(request);
-  const claim = await prisma.claim.findFirst({ where: { id: params.id, shop: session.shop } });
+  const claim = await prisma.claim.findFirst({
+    where: { id: params.id, shop: session.shop },
+  });
   if (!claim) return { ok: false, error: "Claim not found." };
   const body = (await request.json()) as Record<string, unknown>;
-  const text = (v: unknown, max = 3000) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const text = (v: unknown, max = 3000) =>
+    typeof v === "string" ? v.trim().slice(0, max) : "";
 
   try {
     if (body.intent === "resolve") {
       const type = body.type;
-      if (!isResolutionKind(type)) return { ok: false, error: "Choose how to resolve the claim." };
-      const num = (v: unknown) => (v === null || v === undefined || v === "" ? null : Number(v));
+      if (!isResolutionKind(type))
+        return { ok: false, error: "Choose how to resolve the claim." };
+      const num = (v: unknown) =>
+        v === null || v === undefined || v === "" ? null : Number(v);
       const amount = num(body.amount);
-      if (amount !== null && !(Number.isFinite(amount) && amount >= 0)) return { ok: false, error: "Enter a valid amount." };
+      if (amount !== null && !(Number.isFinite(amount) && amount >= 0))
+        return { ok: false, error: "Enter a valid amount." };
       const input =
         type === "REFUND"
           ? { type, amount, notify: body.notify === true }
@@ -175,17 +243,34 @@ export const action = async ({ request, params }: ActionFunctionArgs): Promise<A
       await resolveClaim(admin, session.shop, claim.id, input);
       return { ok: true, intent: "resolve" };
     }
+    if (
+      (body.intent === "dismissFlag" || body.intent === "restoreFlag") &&
+      !(await planHas(session.shop, "risk"))
+    ) {
+      return { ok: false, error: "Dismissing flags is on the Growth plan." };
+    }
+    if (
+      body.intent === "refreshTracking" &&
+      !(await planHas(session.shop, "tracking"))
+    ) {
+      return { ok: false, error: "Tracking is on the Growth plan." };
+    }
     if (body.intent === "dismissFlag" || body.intent === "restoreFlag") {
       const flag = text(body.flag, 40);
-      if (!claim.flags.includes(flag)) return { ok: false, error: "Unknown flag." };
+      if (!claim.flags.includes(flag))
+        return { ok: false, error: "Unknown flag." };
       const note = text(body.note, 1000);
-      if (body.intent === "dismissFlag" && !note) return { ok: false, error: "Say why this flag doesn't apply." };
+      if (body.intent === "dismissFlag" && !note)
+        return { ok: false, error: "Say why this flag doesn't apply." };
       const dismissed =
         body.intent === "dismissFlag"
           ? [...new Set([...claim.dismissedFlags, flag])]
           : claim.dismissedFlags.filter((f) => f !== flag);
       await prisma.$transaction([
-        prisma.claim.update({ where: { id: claim.id }, data: { dismissedFlags: dismissed } }),
+        prisma.claim.update({
+          where: { id: claim.id },
+          data: { dismissedFlags: dismissed },
+        }),
         prisma.claimEvent.create({
           data: {
             claimId: claim.id,
@@ -212,22 +297,57 @@ export const action = async ({ request, params }: ActionFunctionArgs): Promise<A
     if (body.intent === "status") {
       const from = body.from;
       const to = body.to;
-      if (!isClaimStatus(from) || !isClaimStatus(to) || !canTransition(from, to)) {
-        return { ok: false, error: "That change isn't possible from the claim's current status." };
+      if (
+        !isClaimStatus(from) ||
+        !isClaimStatus(to) ||
+        !canTransition(from, to)
+      ) {
+        return {
+          ok: false,
+          error: "That change isn't possible from the claim's current status.",
+        };
       }
       const message = text(body.message);
       const note = text(body.note);
       if ((to === "NEEDS_INFO" || to === "REJECTED") && !message) {
-        return { ok: false, error: "Write a message to the customer explaining what you need or why." };
+        return {
+          ok: false,
+          error:
+            "Write a message to the customer explaining what you need or why.",
+        };
       }
       if (to === "OPEN" && claim.resolvedAt) {
-        return { ok: false, error: "This claim was resolved (money or goods were sent), so it can't be reopened." };
+        return {
+          ok: false,
+          error:
+            "This claim was resolved (money or goods were sent), so it can't be reopened.",
+        };
       }
-      if (to === "OPEN" && (from === "APPROVED" || from === "REJECTED") && !note) {
-        return { ok: false, error: "Add an internal note saying why you're reopening the claim." };
+      if (
+        to === "OPEN" &&
+        (from === "APPROVED" || from === "REJECTED") &&
+        !note
+      ) {
+        return {
+          ok: false,
+          error: "Add an internal note saying why you're reopening the claim.",
+        };
       }
-      const resolution = to === "APPROVED" ? (isResolution(body.resolution) ? body.resolution : "OTHER") : null;
-      await changeClaimStatus(admin, { shop: session.shop, claimId: claim.id, from, to, resolution, message, note });
+      const resolution =
+        to === "APPROVED"
+          ? isResolution(body.resolution)
+            ? body.resolution
+            : "OTHER"
+          : null;
+      await changeClaimStatus(admin, {
+        shop: session.shop,
+        claimId: claim.id,
+        from,
+        to,
+        resolution,
+        message,
+        note,
+      });
       return { ok: true, intent: "status" };
     }
     if (body.intent === "message") {
@@ -240,12 +360,19 @@ export const action = async ({ request, params }: ActionFunctionArgs): Promise<A
       const note = text(body.note);
       if (!note) return { ok: false, error: "Write a note first." };
       await prisma.claimEvent.create({
-        data: { claimId: claim.id, actor: "MERCHANT", kind: "NOTE", message: note, internal: true },
+        data: {
+          claimId: claim.id,
+          actor: "MERCHANT",
+          kind: "NOTE",
+          message: note,
+          internal: true,
+        },
       });
       return { ok: true, intent: "note" };
     }
   } catch (err) {
-    if (err instanceof ClaimConflict || err instanceof ResolutionError) return { ok: false, error: err.message };
+    if (err instanceof ClaimConflict || err instanceof ResolutionError)
+      return { ok: false, error: err.message };
     throw err;
   }
   return { ok: false, error: "Unknown action." };
@@ -259,13 +386,25 @@ const ACTION_LABELS: Record<ClaimStatus, string> = {
 };
 
 export default function ClaimPage() {
-  const { claim, files, events, otherClaims, refund, refundError, running, resolutions, shopCurrency, packages } =
-    useLoaderData<typeof loader>();
+  const {
+    claim,
+    files,
+    events,
+    otherClaims,
+    refund,
+    refundError,
+    running,
+    resolutions,
+    shopCurrency,
+    packages,
+    features,
+  } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionResult>();
   const shopify = useAppBridge();
   const busy = fetcher.state !== "idle";
   const choices = CLAIM_STATUSES.filter(
-    (s) => canTransition(claim.status, s) && !(s === "OPEN" && claim.resolvedAt),
+    (s) =>
+      canTransition(claim.status, s) && !(s === "OPEN" && claim.resolvedAt),
   );
   const [to, setTo] = useState<ClaimStatus | "">("");
   const [resolution, setResolution] = useState<Resolution>("REFUND");
@@ -300,13 +439,22 @@ export default function ClaimPage() {
     shopify.toast.show(toasts[d.intent] ?? "Saved");
   }, [fetcher.data, shopify]);
 
-  const money = (n: number) => new Intl.NumberFormat(undefined, { style: "currency", currency: claim.currency }).format(n);
+  const money = (n: number) =>
+    new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: claim.currency,
+    }).format(n);
   const when = (iso: string) => new Date(iso).toLocaleString();
   const submit = (data: Record<string, unknown>) =>
-    fetcher.submit(data as never, { method: "POST", encType: "application/json" });
+    fetcher.submit(data as never, {
+      method: "POST",
+      encType: "application/json",
+    });
 
   const messageNeeded = to === "NEEDS_INFO" || to === "REJECTED";
-  const reopening = to === "OPEN" && (claim.status === "APPROVED" || claim.status === "REJECTED");
+  const reopening =
+    to === "OPEN" &&
+    (claim.status === "APPROVED" || claim.status === "REJECTED");
 
   return (
     <s-page heading={`${formatClaimNumber(claim.number)} · ${claim.orderName}`}>
@@ -320,18 +468,32 @@ export default function ClaimPage() {
         </s-banner>
       )}
       {claim.flags.length > 0 && (
-        <FlagsPanel flags={claim.flags} dismissed={claim.dismissedFlags} busy={busy} submit={submit} />
+        <FlagsPanel
+          flags={claim.flags}
+          dismissed={claim.dismissedFlags}
+          busy={busy}
+          submit={submit}
+          risk={features.risk}
+        />
       )}
 
       <s-section heading="Decision">
         <s-stack direction="block" gap="base">
           <s-stack direction="inline" gap="small-200" alignItems="center">
-            <s-badge tone={STATUS_TONE[claim.status]}>{STATUS_LABELS[claim.status]}</s-badge>
+            <s-badge tone={STATUS_TONE[claim.status]}>
+              {STATUS_LABELS[claim.status]}
+            </s-badge>
             {claim.status === "APPROVED" && claim.resolution && (
-              <s-text color="subdued">{RESOLUTION_LABELS[claim.resolution]}</s-text>
+              <s-text color="subdued">
+                {RESOLUTION_LABELS[claim.resolution]}
+              </s-text>
             )}
           </s-stack>
-          <s-select label="Next step" value={to} onChange={(e) => setTo(e.currentTarget.value as ClaimStatus | "")}>
+          <s-select
+            label="Next step"
+            value={to}
+            onChange={(e) => setTo(e.currentTarget.value as ClaimStatus | "")}
+          >
             <s-option value="">Choose…</s-option>
             {choices.map((s) => (
               <s-option key={s} value={s}>
@@ -344,7 +506,9 @@ export default function ClaimPage() {
               label="Resolution"
               value={resolution}
               details="Recorded on the claim and told to the customer. Issue the refund, replacement order or store credit in Shopify yourself."
-              onChange={(e) => setResolution(e.currentTarget.value as Resolution)}
+              onChange={(e) =>
+                setResolution(e.currentTarget.value as Resolution)
+              }
             >
               {RESOLUTIONS.map((r) => (
                 <s-option key={r} value={r}>
@@ -355,7 +519,11 @@ export default function ClaimPage() {
           )}
           {to && (
             <s-text-area
-              label={messageNeeded ? "Message to the customer (required)" : "Message to the customer (optional)"}
+              label={
+                messageNeeded
+                  ? "Message to the customer (required)"
+                  : "Message to the customer (optional)"
+              }
               details="Included in the email the customer gets about this change."
               rows={4}
               value={message}
@@ -364,7 +532,11 @@ export default function ClaimPage() {
           )}
           {to && (
             <s-text-area
-              label={reopening ? "Internal note: why reopen? (required)" : "Internal note (optional)"}
+              label={
+                reopening
+                  ? "Internal note: why reopen? (required)"
+                  : "Internal note (optional)"
+              }
               details="Only your staff see this."
               rows={2}
               value={note}
@@ -375,9 +547,21 @@ export default function ClaimPage() {
             <s-button
               variant="primary"
               tone={to === "REJECTED" ? "critical" : "auto"}
-              disabled={(messageNeeded && !message.trim()) || (reopening && !note.trim())}
+              disabled={
+                (messageNeeded && !message.trim()) ||
+                (reopening && !note.trim())
+              }
               {...(busy ? { loading: true } : {})}
-              onClick={() => submit({ intent: "status", from: claim.status, to, resolution, message, note })}
+              onClick={() =>
+                submit({
+                  intent: "status",
+                  from: claim.status,
+                  to,
+                  resolution,
+                  message,
+                  note,
+                })
+              }
             >
               {ACTION_LABELS[to]}
             </s-button>
@@ -401,25 +585,53 @@ export default function ClaimPage() {
         <s-section heading="Resolution">
           <s-stack direction="block" gap="small-200">
             {resolutions.map((r) => (
-              <s-box key={r.id} padding="small-200" borderWidth="base" borderRadius="base">
+              <s-box
+                key={r.id}
+                padding="small-200"
+                borderWidth="base"
+                borderRadius="base"
+              >
                 <s-stack direction="inline" gap="small-200" alignItems="center">
-                  <s-badge tone={r.status === "DONE" ? "success" : r.status === "FAILED" ? "critical" : "info"}>
-                    {r.status === "DONE" ? "Done" : r.status === "FAILED" ? "Failed" : "In progress"}
+                  <s-badge
+                    tone={
+                      r.status === "DONE"
+                        ? "success"
+                        : r.status === "FAILED"
+                          ? "critical"
+                          : "info"
+                    }
+                  >
+                    {r.status === "DONE"
+                      ? "Done"
+                      : r.status === "FAILED"
+                        ? "Failed"
+                        : "In progress"}
                   </s-badge>
-                  <s-text type="strong">{RESOLUTION_KIND_LABELS[r.type]}</s-text>
+                  <s-text type="strong">
+                    {RESOLUTION_KIND_LABELS[r.type]}
+                  </s-text>
                   {r.status === "DONE" && (
                     <s-text>
-                      {new Intl.NumberFormat(undefined, { style: "currency", currency: r.currency }).format(r.amount)}{" "}
+                      {new Intl.NumberFormat(undefined, {
+                        style: "currency",
+                        currency: r.currency,
+                      }).format(r.amount)}{" "}
                       cost
                     </s-text>
                   )}
                   {r.type === "REPLACEMENT" && r.shopifyName && r.shopifyId && (
-                    <s-link href={`shopify://admin/orders/${r.shopifyId.split("/").pop()}`} target="_top">
+                    <s-link
+                      href={`shopify://admin/orders/${r.shopifyId.split("/").pop()}`}
+                      target="_top"
+                    >
                       {r.shopifyName}
                     </s-link>
                   )}
                   {r.type === "REFUND" && r.status === "DONE" && (
-                    <s-link href={`shopify://admin/orders/${claim.orderId}`} target="_top">
+                    <s-link
+                      href={`shopify://admin/orders/${claim.orderId}`}
+                      target="_top"
+                    >
                       See the refund on {claim.orderName}
                     </s-link>
                   )}
@@ -435,15 +647,24 @@ export default function ClaimPage() {
 
       <s-section heading="Claim">
         <s-stack direction="block" gap="base">
-          <s-grid gridTemplateColumns="repeat(auto-fit, minmax(180px, 1fr))" gap="base">
+          <s-grid
+            gridTemplateColumns="repeat(auto-fit, minmax(180px, 1fr))"
+            gap="base"
+          >
             <Field label="What happened" value={TYPE_LABELS[claim.type]} />
             <Field label="Filed" value={when(claim.createdAt)} />
             <Field label="Claimed" value={money(claim.amount)} />
-            <Field label="Protection bought" value={claim.protected ? "Yes" : "No"} />
+            <Field
+              label="Protection bought"
+              value={claim.protected ? "Yes" : "No"}
+            />
           </s-grid>
           <s-stack direction="inline" gap="small-200">
             <s-text color="subdued">Order:</s-text>
-            <s-link href={`shopify://admin/orders/${claim.orderId}`} target="_top">
+            <s-link
+              href={`shopify://admin/orders/${claim.orderId}`}
+              target="_top"
+            >
               {claim.orderName}
             </s-link>
             <s-text color="subdued">Customer email:</s-text>
@@ -483,24 +704,39 @@ export default function ClaimPage() {
                     <img
                       src={f.url}
                       alt={f.name}
-                      style={{ width: 160, height: 160, objectFit: "cover", borderRadius: 8, display: "block" }}
+                      style={{
+                        width: 160,
+                        height: 160,
+                        objectFit: "cover",
+                        borderRadius: 8,
+                        display: "block",
+                      }}
                     />
                   </a>
                 ) : null}
                 <s-link href={f.download} target="_blank">
                   {f.name}
                 </s-link>
-                <s-text color="subdued">{(f.size / 1024 / 1024).toFixed(1)} MB</s-text>
+                <s-text color="subdued">
+                  {(f.size / 1024 / 1024).toFixed(1)} MB
+                </s-text>
               </s-stack>
             ))}
           </s-stack>
         )}
-        <s-text color="subdued">Links stop working after 15 minutes. Reload the page for fresh ones.</s-text>
+        <s-text color="subdued">
+          Links stop working after 15 minutes. Reload the page for fresh ones.
+        </s-text>
       </s-section>
 
       <s-section heading="Packages now">
         <s-stack direction="block" gap="base">
-          {packages.length === 0 ? (
+          {!features.tracking ? (
+            <s-paragraph>
+              Live carrier tracking for this order&apos;s packages is on the
+              Growth plan. <s-link href="/app/plan">Compare plans</s-link>
+            </s-paragraph>
+          ) : packages.length === 0 ? (
             <s-paragraph>No tracking stored for this order yet.</s-paragraph>
           ) : (
             <s-table>
@@ -517,8 +753,12 @@ export default function ClaimPage() {
                     <s-table-cell>
                       <s-stack direction="block" gap="small-100">
                         <s-stack direction="inline" gap="small-100">
-                          <s-badge tone={STAGE_TONE[p.stage]}>{STAGE_LABELS[p.stage]}</s-badge>
-                          {p.claimed && packages.length > 1 && <s-badge>Has claimed items</s-badge>}
+                          <s-badge tone={STAGE_TONE[p.stage]}>
+                            {STAGE_LABELS[p.stage]}
+                          </s-badge>
+                          {p.claimed && packages.length > 1 && (
+                            <s-badge>Has claimed items</s-badge>
+                          )}
                         </s-stack>
                         {p.flags.map((f) => (
                           <s-text key={f} color="subdued">
@@ -530,7 +770,9 @@ export default function ClaimPage() {
                     <s-table-cell>
                       <TrackingLinks tracking={p.tracking} />
                     </s-table-cell>
-                    <s-table-cell>{new Date(p.shippedAt).toLocaleDateString()}</s-table-cell>
+                    <s-table-cell>
+                      {new Date(p.shippedAt).toLocaleDateString()}
+                    </s-table-cell>
                     <s-table-cell>
                       {p.deliveredAt
                         ? `Delivered ${new Date(p.deliveredAt).toLocaleDateString()}`
@@ -548,12 +790,20 @@ export default function ClaimPage() {
               </s-table-body>
             </s-table>
           )}
-          <s-stack direction="inline" gap="small-200" alignItems="center">
-            <s-button {...(busy ? { loading: true } : {})} onClick={() => submit({ intent: "refreshTracking" })}>
-              Refresh tracking
-            </s-button>
-            <s-text color="subdued">A delivery scan alone doesn&apos;t prove a package arrived — or that it didn&apos;t.</s-text>
-          </s-stack>
+          {features.tracking && (
+            <s-stack direction="inline" gap="small-200" alignItems="center">
+              <s-button
+                {...(busy ? { loading: true } : {})}
+                onClick={() => submit({ intent: "refreshTracking" })}
+              >
+                Refresh tracking
+              </s-button>
+              <s-text color="subdued">
+                A delivery scan alone doesn&apos;t prove a package arrived — or
+                that it didn&apos;t.
+              </s-text>
+            </s-stack>
+          )}
         </s-stack>
       </s-section>
 
@@ -571,9 +821,17 @@ export default function ClaimPage() {
             <s-table-body>
               {claim.shipments.map((s, i) => (
                 <s-table-row key={i}>
-                  <s-table-cell>{s.status.replace(/_/g, " ").toLowerCase()}</s-table-cell>
-                  <s-table-cell>{new Date(s.shippedAt).toLocaleDateString()}</s-table-cell>
-                  <s-table-cell>{s.deliveredAt ? new Date(s.deliveredAt).toLocaleDateString() : "—"}</s-table-cell>
+                  <s-table-cell>
+                    {s.status.replace(/_/g, " ").toLowerCase()}
+                  </s-table-cell>
+                  <s-table-cell>
+                    {new Date(s.shippedAt).toLocaleDateString()}
+                  </s-table-cell>
+                  <s-table-cell>
+                    {s.deliveredAt
+                      ? new Date(s.deliveredAt).toLocaleDateString()
+                      : "—"}
+                  </s-table-cell>
                   <s-table-cell>
                     <TrackingLinks tracking={s.tracking} />
                   </s-table-cell>
@@ -587,7 +845,12 @@ export default function ClaimPage() {
       <s-section heading="History">
         <s-stack direction="block" gap="base">
           {events.map((e) => (
-            <s-box key={e.id} padding="small-200" borderWidth="base" borderRadius="base">
+            <s-box
+              key={e.id}
+              padding="small-200"
+              borderWidth="base"
+              borderRadius="base"
+            >
               <s-stack direction="block" gap="small-200">
                 <s-stack direction="inline" gap="small-200" alignItems="center">
                   <s-text type="strong">{eventTitle(e)}</s-text>
@@ -610,7 +873,10 @@ export default function ClaimPage() {
             value={freeMessage}
             onInput={(e) => setFreeMessage(e.currentTarget.value)}
           />
-          <s-button disabled={!freeMessage.trim()} onClick={() => submit({ intent: "message", message: freeMessage })}>
+          <s-button
+            disabled={!freeMessage.trim()}
+            onClick={() => submit({ intent: "message", message: freeMessage })}
+          >
             Send message
           </s-button>
           <s-text-area
@@ -620,7 +886,10 @@ export default function ClaimPage() {
             value={freeNote}
             onInput={(e) => setFreeNote(e.currentTarget.value)}
           />
-          <s-button disabled={!freeNote.trim()} onClick={() => submit({ intent: "note", note: freeNote })}>
+          <s-button
+            disabled={!freeNote.trim()}
+            onClick={() => submit({ intent: "note", note: freeNote })}
+          >
             Add note
           </s-button>
         </s-stack>
@@ -631,8 +900,10 @@ export default function ClaimPage() {
           <s-unordered-list>
             {otherClaims.map((c) => (
               <s-list-item key={c.id}>
-                <s-link href={`/app/claims/${c.id}`}>{formatClaimNumber(c.number)}</s-link> · {c.orderName} ·{" "}
-                {STATUS_LABELS[c.status]}
+                <s-link href={`/app/claims/${c.id}`}>
+                  {formatClaimNumber(c.number)}
+                </s-link>{" "}
+                · {c.orderName} · {STATUS_LABELS[c.status]}
               </s-list-item>
             ))}
           </s-unordered-list>
@@ -653,7 +924,12 @@ function ResolvePanel({
   busy,
   submit,
 }: {
-  claim: { amount: number; currency: string; resolution: Resolution | null; orderName: string };
+  claim: {
+    amount: number;
+    currency: string;
+    resolution: Resolution | null;
+    orderName: string;
+  };
   refund: RefundPreview | null;
   refundError: string | null;
   running: { stuck: boolean } | null;
@@ -662,7 +938,9 @@ function ResolvePanel({
   submit: Submit;
 }) {
   const shopify = useAppBridge();
-  const [kind, setKind] = useState<ResolutionKind>(defaultKind(claim.resolution));
+  const [kind, setKind] = useState<ResolutionKind>(
+    defaultKind(claim.resolution),
+  );
   const [custom, setCustom] = useState(false);
   const [amount, setAmount] = useState("");
   const [notify, setNotify] = useState(false);
@@ -681,8 +959,14 @@ function ResolvePanel({
     };
   }, [shopify]);
 
-  const fmt = (n: number, c: string) => new Intl.NumberFormat(undefined, { style: "currency", currency: c }).format(n);
-  const missing = granted === null ? [] : KIND_SCOPES[kind].filter((s) => !granted.includes(s));
+  const fmt = (n: number, c: string) =>
+    new Intl.NumberFormat(undefined, { style: "currency", currency: c }).format(
+      n,
+    );
+  const missing =
+    granted === null
+      ? []
+      : KIND_SCOPES[kind].filter((s) => !granted.includes(s));
   const value = amount.trim() === "" ? null : Number(amount);
 
   const label =
@@ -707,12 +991,19 @@ function ResolvePanel({
     <s-section heading="Carry out the resolution">
       <s-stack direction="block" gap="base">
         {running && (
-          <s-banner tone={running.stuck ? "warning" : "info"} heading={running.stuck ? "An attempt didn't finish" : "In progress"}>
+          <s-banner
+            tone={running.stuck ? "warning" : "info"}
+            heading={running.stuck ? "An attempt didn't finish" : "In progress"}
+          >
             {running.stuck ? (
               <>
-                Check {claim.orderName} in Shopify (refunds, new orders, store credit). If nothing was created, clear the
-                attempt and try again.{" "}
-                <s-button variant="tertiary" onClick={() => submit({ intent: "clearStuck" })}>
+                Check {claim.orderName} in Shopify (refunds, new orders, store
+                credit). If nothing was created, clear the attempt and try
+                again.{" "}
+                <s-button
+                  variant="tertiary"
+                  onClick={() => submit({ intent: "clearStuck" })}
+                >
                   Nothing was created — clear it
                 </s-button>
               </>
@@ -741,9 +1032,11 @@ function ResolvePanel({
           (refund ? (
             <s-stack direction="block" gap="small-200">
               <s-paragraph>
-                Refunds {fmt(refund.amount, refund.currency)} for the claimed items, tax included, to{" "}
-                {refund.sources.map((s) => s.label).join(" and ") || "the original payment"}. The items aren&apos;t
-                restocked.
+                Refunds {fmt(refund.amount, refund.currency)} for the claimed
+                items, tax included, to{" "}
+                {refund.sources.map((s) => s.label).join(" and ") ||
+                  "the original payment"}
+                . The items aren&apos;t restocked.
               </s-paragraph>
               <s-checkbox
                 label="Refund a different amount (money only, no items)"
@@ -768,14 +1061,17 @@ function ResolvePanel({
               />
             </s-stack>
           ) : (
-            <s-banner tone="warning">{refundError ?? "A refund can't be worked out for this order."}</s-banner>
+            <s-banner tone="warning">
+              {refundError ?? "A refund can't be worked out for this order."}
+            </s-banner>
           ))}
 
         {kind === "REPLACEMENT" && (
           <s-stack direction="block" gap="small-200">
             <s-paragraph>
-              Creates a new order for the claimed items at no charge, shipped to the original order&apos;s address,
-              tagged &ldquo;Shipping protection replacement&rdquo;. Fulfil it like any other order.
+              Creates a new order for the claimed items at no charge, shipped to
+              the original order&apos;s address, tagged &ldquo;Shipping
+              protection replacement&rdquo;. Fulfil it like any other order.
             </s-paragraph>
             <s-number-field
               label={`Your cost, for reports (${shopCurrency})`}
@@ -792,7 +1088,8 @@ function ResolvePanel({
         {kind === "STORE_CREDIT" && (
           <s-stack direction="block" gap="small-200">
             <s-paragraph>
-              Adds store credit to the customer&apos;s account. They use it at checkout when signed in.
+              Adds store credit to the customer&apos;s account. They use it at
+              checkout when signed in.
             </s-paragraph>
             <s-number-field
               label={`Amount (${shopCurrency})`}
@@ -808,7 +1105,8 @@ function ResolvePanel({
         {kind === "MANUAL" && (
           <s-stack direction="block" gap="small-200">
             <s-paragraph>
-              For anything you did yourself in Shopify or elsewhere. Nothing is sent to Shopify or the customer.
+              For anything you did yourself in Shopify or elsewhere. Nothing is
+              sent to Shopify or the customer.
             </s-paragraph>
             <s-number-field
               label={`What it cost you (${shopCurrency})`}
@@ -817,13 +1115,18 @@ function ResolvePanel({
               value={amount}
               onInput={(e) => setAmount(e.currentTarget.value)}
             />
-            <s-text-field label="What you did" value={note} onInput={(e) => setNote(e.currentTarget.value)} />
+            <s-text-field
+              label="What you did"
+              value={note}
+              onInput={(e) => setNote(e.currentTarget.value)}
+            />
           </s-stack>
         )}
 
         {missing.length > 0 ? (
           <s-banner tone="info" heading="Permission needed">
-            The app needs your permission to {kind === "REPLACEMENT" ? "create orders" : "issue store credit"}.{" "}
+            The app needs your permission to{" "}
+            {kind === "REPLACEMENT" ? "create orders" : "issue store credit"}.{" "}
             <s-button
               onClick={() =>
                 shopify.scopes
@@ -838,7 +1141,11 @@ function ResolvePanel({
           </s-banner>
         ) : confirming ? (
           <s-stack direction="inline" gap="small-200">
-            <s-button variant="primary" {...(busy ? { loading: true } : {})} onClick={go}>
+            <s-button
+              variant="primary"
+              {...(busy ? { loading: true } : {})}
+              onClick={go}
+            >
               Yes, {label.charAt(0).toLowerCase() + label.slice(1)}
             </s-button>
             <s-button onClick={() => setConfirming(false)}>Cancel</s-button>
@@ -849,7 +1156,14 @@ function ResolvePanel({
               variant="primary"
               disabled={
                 !!running ||
-                (kind === "REFUND" && (!refund || (custom && !(value !== null && value > 0 && value <= refund.amount)))) ||
+                (kind === "REFUND" &&
+                  (!refund ||
+                    (custom &&
+                      !(
+                        value !== null &&
+                        value > 0 &&
+                        value <= refund.amount
+                      )))) ||
                 (kind === "MANUAL" && value === null)
               }
               onClick={() => setConfirming(true)}
@@ -864,10 +1178,17 @@ function ResolvePanel({
 }
 
 function eventTitle(e: { actor: string; kind: string; status: string | null }) {
-  const who = e.actor === "CUSTOMER" ? "Customer" : e.actor === "MERCHANT" ? "Staff" : "System";
+  const who =
+    e.actor === "CUSTOMER"
+      ? "Customer"
+      : e.actor === "MERCHANT"
+        ? "Staff"
+        : "System";
   switch (e.kind) {
     case "SUBMITTED":
-      return e.actor === "MERCHANT" ? "Staff created the claim" : "Customer filed the claim";
+      return e.actor === "MERCHANT"
+        ? "Staff created the claim"
+        : "Customer filed the claim";
     case "STATUS":
       return `${who}: ${STATUS_LABELS[e.status as ClaimStatus] ?? e.status}`;
     case "MESSAGE":
@@ -895,7 +1216,9 @@ function TrackingLinks({ tracking }: { tracking: TrackingNumber[] }) {
             {[t.company, t.number].filter(Boolean).join(" ")}
           </s-link>
         ) : (
-          <s-text key={j}>{[t.company, t.number].filter(Boolean).join(" ")}</s-text>
+          <s-text key={j}>
+            {[t.company, t.number].filter(Boolean).join(" ")}
+          </s-text>
         ),
       )}
     </s-stack>
@@ -903,12 +1226,39 @@ function TrackingLinks({ tracking }: { tracking: TrackingNumber[] }) {
 }
 
 /** Review flags: warnings (with dismiss for false positives) and carrier data that supports the claim. */
-function FlagsPanel({ flags, dismissed, busy, submit }: { flags: string[]; dismissed: string[]; busy: boolean; submit: Submit }) {
+function FlagsPanel({
+  flags,
+  dismissed,
+  busy,
+  submit,
+  risk,
+}: {
+  flags: string[];
+  dismissed: string[];
+  busy: boolean;
+  submit: Submit;
+  /** Review priority and dismissing need the "risk" feature. */
+  risk: boolean;
+}) {
   const [dismissing, setDismissing] = useState<string | null>(null);
   const [why, setWhy] = useState("");
   const warnings = flags.filter((f) => !isSupportFlag(f));
   const support = flags.filter(isSupportFlag);
   const priority = reviewPriority(flags, dismissed);
+  if (!risk) {
+    return (
+      <s-banner tone="warning" heading="Check before deciding">
+        <s-unordered-list>
+          {flags.map((f) => (
+            <s-list-item key={f}>{FLAG_LABELS[f] ?? f}</s-list-item>
+          ))}
+        </s-unordered-list>
+        These are hints from the order and tracking data, not proof either way.
+        Risk signals and review priority are on the{" "}
+        <s-link href="/app/plan">Growth plan</s-link>.
+      </s-banner>
+    );
+  }
   return (
     <>
       {warnings.length > 0 && (
@@ -921,22 +1271,44 @@ function FlagsPanel({ flags, dismissed, busy, submit }: { flags: string[]; dismi
               const off = dismissed.includes(f);
               return (
                 <s-stack key={f} direction="block" gap="small-100">
-                  <s-stack direction="inline" gap="small-200" alignItems="center">
-                    <s-text>{off ? <s>{FLAG_LABELS[f] ?? f}</s> : (FLAG_LABELS[f] ?? f)}</s-text>
+                  <s-stack
+                    direction="inline"
+                    gap="small-200"
+                    alignItems="center"
+                  >
+                    <s-text>
+                      {off ? (
+                        <s>{FLAG_LABELS[f] ?? f}</s>
+                      ) : (
+                        (FLAG_LABELS[f] ?? f)
+                      )}
+                    </s-text>
                     {off ? (
-                      <s-button variant="tertiary" onClick={() => submit({ intent: "restoreFlag", flag: f })}>
+                      <s-button
+                        variant="tertiary"
+                        onClick={() =>
+                          submit({ intent: "restoreFlag", flag: f })
+                        }
+                      >
                         Restore
                       </s-button>
                     ) : (
                       dismissing !== f && (
-                        <s-button variant="tertiary" onClick={() => (setDismissing(f), setWhy(""))}>
+                        <s-button
+                          variant="tertiary"
+                          onClick={() => (setDismissing(f), setWhy(""))}
+                        >
                           Not relevant
                         </s-button>
                       )
                     )}
                   </s-stack>
                   {dismissing === f && (
-                    <s-stack direction="inline" gap="small-200" alignItems="end">
+                    <s-stack
+                      direction="inline"
+                      gap="small-200"
+                      alignItems="end"
+                    >
                       <s-text-field
                         label="Why doesn't it apply? (internal)"
                         value={why}
@@ -952,7 +1324,10 @@ function FlagsPanel({ flags, dismissed, busy, submit }: { flags: string[]; dismi
                       >
                         Dismiss
                       </s-button>
-                      <s-button variant="tertiary" onClick={() => setDismissing(null)}>
+                      <s-button
+                        variant="tertiary"
+                        onClick={() => setDismissing(null)}
+                      >
                         Cancel
                       </s-button>
                     </s-stack>
@@ -961,14 +1336,18 @@ function FlagsPanel({ flags, dismissed, busy, submit }: { flags: string[]; dismi
               );
             })}
             <s-text color="subdued">
-              Hints from the order, tracking and your other claims — not proof either way. Never treat a customer as
-              dishonest because of a flag alone.
+              Hints from the order, tracking and your other claims — not proof
+              either way. Never treat a customer as dishonest because of a flag
+              alone.
             </s-text>
           </s-stack>
         </s-banner>
       )}
       {support.length > 0 && (
-        <s-banner tone="success" heading="Carrier data that supports this claim">
+        <s-banner
+          tone="success"
+          heading="Carrier data that supports this claim"
+        >
           <s-unordered-list>
             {support.map((f) => (
               <s-list-item key={f}>{FLAG_LABELS[f] ?? f}</s-list-item>

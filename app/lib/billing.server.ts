@@ -1,16 +1,16 @@
-// Billing: one usage-based plan through Shopify's Billing API.
-//   - The merchant approves the plan (a capped usage subscription) before
+// Billing: usage-based plans through Shopify's Billing API (./plan.ts).
+//   - The merchant approves a plan (a capped usage subscription) before
 //     using the admin (app/routes/app.tsx sends them to /app/plan).
-//   - Each protected order is recorded by orders/create; the first
-//     FREE_ORDERS of each billing cycle are free, then PRICE_PER_ORDER each,
-//     as a usage record, up to the plan's monthly cap.
+//   - Each protected order is recorded by orders/create; the plan's free
+//     orders each billing cycle cost nothing, then its price per order, as
+//     a usage record, up to its cap.
 //   - Development stores get test charges (no money moves).
-// The plan's prices live in ./plan.ts so the plan page can show them.
+//   - Shop.plan mirrors the active plan (syncPlan) for feature gates.
 // Managed Pricing must be OFF in the Partner Dashboard for this to work.
 import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
-import { PLAN, decideCharge } from "./plan";
-import type { AdminGraphql } from "./setup.server";
+import { decideCharge, isPlanId, PLANS, planFromBillingName, type PlanId } from "./plan";
+import { syncProtection, type AdminGraphql } from "./setup.server";
 
 async function gql<T>(admin: AdminGraphql, query: string, variables?: Record<string, unknown>): Promise<T> {
   const res = await admin.graphql(query, variables ? { variables } : undefined);
@@ -22,6 +22,7 @@ async function gql<T>(admin: AdminGraphql, query: string, variables?: Record<str
 export interface ActivePlan {
   subscriptionId: string;
   name: string;
+  plan: PlanId;
   test: boolean;
   currentPeriodEnd: string | null;
   usageLineItemId: string;
@@ -63,10 +64,12 @@ export async function activePlan(admin: AdminGraphql): Promise<ActivePlan | null
   for (const sub of data.currentAppInstallation.activeSubscriptions) {
     if (sub.status !== "ACTIVE") continue;
     const usage = sub.lineItems.find((l) => l.plan.pricingDetails.cappedAmount);
-    if (!usage) continue;
+    const plan = planFromBillingName(sub.name);
+    if (!usage || !plan) continue;
     return {
       subscriptionId: sub.id,
       name: sub.name,
+      plan,
       test: sub.test,
       currentPeriodEnd: sub.currentPeriodEnd,
       usageLineItemId: usage.id,
@@ -75,6 +78,34 @@ export async function activePlan(admin: AdminGraphql): Promise<ActivePlan | null
     };
   }
   return null;
+}
+
+/**
+ * Reads the active plan from Shopify and mirrors it on the shop row
+ * (Shop.plan), which feature gates read. Returns the plan (null = none).
+ */
+export async function syncPlan(admin: AdminGraphql, shop: string): Promise<ActivePlan | null> {
+  const plan = await activePlan(admin);
+  const row = await prisma.shop.findUnique({ where: { shop }, select: { plan: true, settings: true, syncedVersion: true } });
+  const next = plan?.plan ?? null;
+  if (row && row.plan !== next) {
+    await prisma.shop.update({ where: { shop }, data: { plan: next } });
+    // Plan features live in the store's config (market prices, exact
+    // pricing, the checkout toggle): push it again so the storefront and
+    // checkout follow the new plan. A failure shows on Home as usual.
+    if (row.settings !== null && row.syncedVersion > 0) {
+      await syncProtection(admin, shop).catch((err) =>
+        console.error(`[billing] resync after plan change on ${shop}:`, err instanceof Error ? err.message : err),
+      );
+    }
+  }
+  return plan;
+}
+
+/** The shop's plan as last synced (no API call) — for webhooks and the daily job. */
+export async function shopPlan(shop: string): Promise<PlanId | null> {
+  const row = await prisma.shop.findUnique({ where: { shop }, select: { plan: true } });
+  return isPlanId(row?.plan) ? row.plan : null;
 }
 
 /** Is this a development store (test charges)? */
@@ -124,7 +155,7 @@ export async function billProtectedOrder(admin: AdminGraphql, shop: string, orde
     const used = await tx.usageCharge.count({
       where: { shop, periodEnd: cycle.end, status: { in: ["FREE", "CHARGED", "CAPPED"] }, NOT: { orderId: order.id } },
     });
-    const d = decideCharge(used);
+    const d = decideCharge(PLANS[plan.plan], used);
     if (d === "FREE") {
       await upsert(tx, shop, order, { status: "FREE", periodEnd: cycle.end, test: plan.test });
     }
@@ -132,7 +163,8 @@ export async function billProtectedOrder(admin: AdminGraphql, shop: string, orde
   });
   if (decision === "FREE") return prisma.usageCharge.findUnique({ where: { shop_orderId: { shop, orderId: order.id } } });
 
-  if (plan.balanceUsed + PLAN.pricePerOrder > plan.cappedAmount + 1e-9) {
+  const price = PLANS[plan.plan].pricePerOrder;
+  if (plan.balanceUsed + price > plan.cappedAmount + 1e-9) {
     return save(shop, order, { status: "CAPPED", periodEnd: cycle.end, test: plan.test });
   }
   try {
@@ -149,7 +181,7 @@ export async function billProtectedOrder(admin: AdminGraphql, shop: string, orde
       }`,
       {
         id: plan.usageLineItemId,
-        price: { amount: PLAN.pricePerOrder.toFixed(2), currencyCode: PLAN.currency },
+        price: { amount: price.toFixed(2), currencyCode: PLANS[plan.plan].currency },
         description: `Protected order ${order.name}`,
         key: `sp-order-${order.id}`,
       },
@@ -163,7 +195,7 @@ export async function billProtectedOrder(admin: AdminGraphql, shop: string, orde
     }
     return save(shop, order, {
       status: "CHARGED",
-      amount: PLAN.pricePerOrder,
+      amount: price,
       periodEnd: cycle.end,
       test: plan.test,
       usageRecordId: data.appUsageRecordCreate.appUsageRecord?.id ?? null,

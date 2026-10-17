@@ -65,6 +65,10 @@ model Shop {
   // Development or sandbox store: charges are test charges (no money moves).
   // Set on every auth from shop.plan.partnerDevelopment (or BILLING_TEST=true).
   billingTest   Boolean   @default(false)
+  // The active plan (app/lib/plan.ts PlanId), null = none approved. Synced
+  // from Shopify on every admin load and by app_subscriptions/update, so
+  // webhooks and the daily job can gate features without an API call.
+  plan          String?
 
   updatedAt DateTime @updatedAt
 

@@ -38,6 +38,8 @@ import { parseSettings } from "../lib/settings";
 import { ensureShop } from "../lib/shop.server";
 import { refusalText } from "../lib/i18n";
 import { storeShipments, type FulfillmentNode } from "../lib/tracking.server";
+import { hasFeature, isPlanId } from "../lib/plan";
+import { UpgradeNotice } from "../components/Upgrade";
 
 async function policyProblems(
   shop: string,
@@ -67,6 +69,9 @@ async function policyProblems(
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
   const shopRow = await ensureShop(session.shop);
+  if (!hasFeature(isPlanId(shopRow.plan) ? shopRow.plan : null, "staffClaims")) {
+    return { locked: true as const, order: null, q: "", error: null, currency: shopRow.currency };
+  }
   const settings = parseSettings(shopRow.settings);
   const url = new URL(request.url);
   const orderId = url.searchParams.get("order");
@@ -88,7 +93,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   } catch (err) {
     error = `Couldn't load the order: ${err instanceof Error ? err.message : String(err)}`;
   }
-  if (!order) return { order: null, q, error, currency: shopRow.currency };
+  if (!order) return { locked: false as const, order: null, q, error, currency: shopRow.currency };
 
   const policy = await policyProblems(
     session.shop,
@@ -97,6 +102,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     new Date(),
   );
   return {
+    locked: false as const,
     q,
     error,
     currency: order.currency,
@@ -128,6 +134,8 @@ export const action = async ({
 }: ActionFunctionArgs): Promise<ActionResult | Response> => {
   const { session, admin } = await authenticate.admin(request);
   const shopRow = await ensureShop(session.shop);
+  const plan = isPlanId(shopRow.plan) ? shopRow.plan : null;
+  if (!hasFeature(plan, "staffClaims")) return { ok: false, error: "Creating claims is on the Growth plan." };
   const settings = parseSettings(shopRow.settings);
   const body = (await request.json()) as Record<string, unknown>;
   const text = (v: unknown, max = 3000) =>
@@ -206,6 +214,7 @@ export const action = async ({
     settings: settings.claims,
     tracking: settings.tracking,
     now,
+    plan,
   });
   const claim = await createClaim({
     shop: session.shop,
@@ -245,6 +254,19 @@ export const action = async ({
 export default function NewClaim() {
   const d = useLoaderData<typeof loader>();
   const o = d.order;
+  if (d.locked) {
+    return (
+      <s-page heading="Create a claim">
+        <s-link slot="breadcrumb-actions" href="/app/claims">
+          Claims
+        </s-link>
+        <UpgradeNotice feature="staffClaims">
+          Create a claim for a customer who phoned or emailed you, or for a package you know is lost — with the
+          same review flags as a claim filed on your claims page.
+        </UpgradeNotice>
+      </s-page>
+    );
+  }
   return (
     <s-page heading="Create a claim">
       <s-link slot="breadcrumb-actions" href="/app/claims">

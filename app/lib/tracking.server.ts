@@ -7,6 +7,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
 import type { Shipment as ClaimShipment } from "./claims";
 import { parseSettings } from "./settings";
+import { hasFeature, PLAN_ORDER, type PlanId } from "./plan";
 import type { AdminGraphql } from "./setup.server";
 import {
   FOLLOW_DAYS,
@@ -66,8 +67,16 @@ export function toShipment(f: FulfillmentNode): ClaimShipment & { stage: Stage; 
   };
 }
 
-/** Whether this order's packages are worth following: protection bought, or a claim filed. */
+/** Plans with tracking — the webhook and the daily job skip every other shop. */
+export const TRACKING_PLANS = PLAN_ORDER.filter((id) => hasFeature(id, "tracking"));
+
+/**
+ * Whether this order's packages are worth following: the shop's plan has
+ * tracking, and protection was bought or a claim filed.
+ */
 export async function shouldTrack(shop: string, orderId: string) {
+  const row = await prisma.shop.findUnique({ where: { shop }, select: { plan: true } });
+  if (!TRACKING_PLANS.includes(row?.plan as PlanId)) return false;
   const [rec, claim] = await Promise.all([
     prisma.orderRecord.findUnique({ where: { shop_orderId: { shop, orderId } }, select: { protected: true } }),
     prisma.claim.findFirst({ where: { shop, orderId }, select: { id: true } }),

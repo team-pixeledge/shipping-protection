@@ -248,21 +248,39 @@ Phase 1 records a resolution but doesn't carry it out.
   order number (8/15 min), per shopper IP from X-Forwarded-For if present
   (20), per shop (600).
 
-## Billing (added 2026-10-17)
+## Billing and plans (added 2026-10-17)
 
-- One usage plan (`app/lib/plan.ts` — the only place prices live): first 50
-  protected orders per 30-day cycle free, then $0.05, cap $299 (the
-  subscription's `cappedAmount`). Billing API, so **Managed Pricing must be
-  off** in the Partner Dashboard.
-- `app.tsx` loader: no active plan → redirect to `/app/plan` (the only page
-  open without one). `Shop.billingTest` (dev store or `BILLING_TEST=true`,
-  set in afterAuth) drives `isTest`.
+- **Three usage-based plans** in `app/lib/plan.ts` — the only place prices,
+  caps and features live: Starter $0.03 / Growth $0.05 / Pro $0.08 per
+  protected order after 50 free per 30-day cycle, caps $149 / $299 / $499,
+  no monthly fee. Higher plans cost more per order and add features
+  (`FeatureKey`: tracking, risk, claimRules, staffClaims, languages on
+  Growth; + marketPrices, exactPricing, checkoutToggle on Pro). Prices were
+  **proposed for the user to review** (2026-10-17). The pre-tier
+  subscription "SafeShip Usage" maps to Growth (`LEGACY_NAMES`).
+- One Billing API usage subscription per plan (`billingName`, don't rename),
+  `replacementBehavior: APPLY_IMMEDIATELY`. **Managed Pricing must be off.**
+- `Shop.plan` mirrors the active plan: `syncPlan` on every admin load
+  (`app.tsx`; falls back to the stored plan if Shopify is unreachable) and on
+  `app_subscriptions/update`. When the plan changes, `syncPlan` re-runs
+  `syncProtection` so Pro-only config (market prices, exact pricing,
+  `cfg.checkout`) follows. No plan → everything but `/app/plan` redirects there.
+- **Gates** (all read `hasFeature`; settings stay stored, clamped when used):
+  `gates.ts` (`effectiveClaimSettings`, `gateFlags`/`BASIC_FLAGS`),
+  `assessClaim(plan)` skips the risk lookups, `proxyContext` forces English
+  without `languages`, `shouldTrack` + the daily job skip shops without
+  `tracking` (`TRACKING_PLANS`), `syncProtection` drops market prices/exact
+  pricing and sets `cfg.checkout` only on Pro, UI shows `UpgradeNotice`
+  (`app/components/Upgrade.tsx`).
 - `orders/create` → `billProtectedOrder`: one `UsageCharge` row per order
-  (FREE / CHARGED / CAPPED / NO_PLAN / FAILED); the free allowance is counted
-  under a per-shop `pg_advisory_xact_lock`. Usage records use the **raw**
-  `appUsageRecordCreate` with `idempotencyKey: sp-order-<id>` — the library's
-  `createUsageRecord` silently drops the key. FAILED rows retry on the next
-  webhook delivery; billing never fails the webhook.
+  (FREE / CHARGED / CAPPED / NO_PLAN / FAILED), at the active plan's price;
+  the free allowance is counted under a per-shop `pg_advisory_xact_lock`.
+  Usage records use the **raw** `appUsageRecordCreate` with
+  `idempotencyKey: sp-order-<id>` — the library's `createUsageRecord`
+  silently drops the key. FAILED rows retry on the next webhook delivery.
+- The Plan & pricing page (`app.plan.tsx`) follows weather-slip's Plans page:
+  current plan + cap bar, plan cards (`CARD_FEATURES`), a full comparison
+  table (`COMPARISON`), cost by volume (`cycleCost`) and the FAQ.
 
 ## Market prices, exact pricing, checkout toggle (added 2026-10-17)
 

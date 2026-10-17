@@ -23,6 +23,7 @@ const cfg: ProtectionConfig = {
   optInCountries: [],
   copy: { title: "", description: "", learnMoreUrl: "" },
   markets: [{ marketId: 7, name: "Europe", countries: ["DE", "FR"], amount: 2.99, currency: "EUR", variantId: 77 }],
+  checkout: true,
 };
 
 describe("market fixed prices", () => {
@@ -130,5 +131,7 @@ describe("checkout toggle logic", () => {
     const tagged = { ...cfg, coverage: { mode: "ONLY" as const, tags: ["fragile"], productTypes: [], vendors: [], productIds: [] } };
     expect(checkoutState(tagged, lines, 1, "US").offered).toBe(false);
     expect(checkoutState(cfg, [], 1, "US").offered).toBe(false);
+    // Only when the plan includes the checkout toggle.
+    expect(checkoutState({ ...cfg, checkout: false }, lines, 1, "US").offered).toBe(false);
   });
 });

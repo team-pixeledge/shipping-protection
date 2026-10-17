@@ -52,6 +52,8 @@ export function checkoutState(
 ): CheckoutState {
   const none = (reason: string): CheckoutState => ({ offered: false, quote: null, protection: [], reason });
   if (!cfg?.enabled || !cfg.productId) return none("off");
+  // A plan feature (Pro): the config says whether it's on.
+  if (!cfg.checkout) return none("plan");
   // Tags aren't visible in checkout, so tag-based coverage can't be priced here.
   if (usesTags(cfg.coverage)) return none("tags");
   if (!rate) return none("rate");

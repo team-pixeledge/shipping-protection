@@ -17,6 +17,7 @@ import {
   PRIORITY_LABELS,
   reviewPriority,
 } from "../lib/claims";
+import { hasFeature, isPlanId } from "../lib/plan";
 import { ensureShop } from "../lib/shop.server";
 import { parseSettings } from "../lib/settings";
 
@@ -25,6 +26,8 @@ const PAGE = 50;
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = await ensureShop(session.shop);
+  const plan = isPlanId(shop.plan) ? shop.plan : null;
+  const risk = hasFeature(plan, "risk");
   const url = new URL(request.url);
   const raw = url.searchParams.get("status");
   const status = isClaimStatus(raw) ? raw : null;
@@ -54,7 +57,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       status: c.status as ClaimStatus,
       amount: Number(c.amount),
       currency: c.currency,
-      priority: reviewPriority(c.flags, c.dismissedFlags),
+      priority: risk ? reviewPriority(c.flags, c.dismissedFlags) : ("LOW" as const),
       staff: c.source === "STAFF",
       at: c.createdAt.toISOString(),
     })),

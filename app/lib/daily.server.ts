@@ -4,7 +4,7 @@
 import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import { cleanupOrphanUploads } from "./blob.server";
-import { syncShop } from "./tracking.server";
+import { syncShop, TRACKING_PLANS } from "./tracking.server";
 
 export async function runDaily(budgetMs = 240_000) {
   const started = Date.now();
@@ -13,7 +13,8 @@ export async function runDaily(budgetMs = 240_000) {
 
   // Shops least recently synced first, so a shop that didn't fit yesterday goes first today.
   const shops = await prisma.shop.findMany({
-    where: { uninstalledAt: null, settings: { not: { equals: null } } },
+    // Tracking is a plan feature: other shops are skipped.
+    where: { uninstalledAt: null, settings: { not: { equals: null } }, plan: { in: TRACKING_PLANS } },
     select: { shop: true },
   });
   const order = await prisma.shipment.groupBy({ by: ["shop"], _min: { checkedAt: true } });

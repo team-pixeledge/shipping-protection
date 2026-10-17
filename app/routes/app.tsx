@@ -4,20 +4,20 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
 import { authenticate } from "../shopify.server";
-import prisma from "../db.server";
-import { PLAN } from "../lib/plan";
+import { shopPlan, syncPlan } from "../lib/billing.server";
 
 /** Pages a merchant can open before approving the plan. */
 const OPEN_WITHOUT_PLAN = ["/app/plan"];
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { billing, session, redirect } = await authenticate.admin(request);
+  const { admin, session, redirect } = await authenticate.admin(request);
   const path = new URL(request.url).pathname;
-  if (!OPEN_WITHOUT_PLAN.includes(path)) {
-    const row = await prisma.shop.findUnique({ where: { shop: session.shop }, select: { billingTest: true } });
-    const { hasActivePayment } = await billing.check({ plans: [PLAN.name], isTest: row?.billingTest ?? false });
-    if (!hasActivePayment) throw redirect("/app/plan");
-  }
+  // Also keeps Shop.plan (the feature gates) in step with Shopify.
+  // If Shopify can't be reached, trust the last synced plan rather than lock the merchant out.
+  const plan = await syncPlan(admin, session.shop)
+    .then((p) => p?.plan ?? null)
+    .catch(() => shopPlan(session.shop));
+  if (!plan && !OPEN_WITHOUT_PLAN.includes(path)) throw redirect("/app/plan");
   // eslint-disable-next-line no-undef
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };

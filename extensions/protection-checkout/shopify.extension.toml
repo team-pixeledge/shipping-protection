@@ -6,6 +6,7 @@ api_version = "2026-10"
 [[extensions]]
 name = "t:name"
 handle = "protection-checkout"
+uid = "8e261e35-db92-1d55-984e-e356d29067388e0586ae"
 type = "ui_extension"
 
 [[extensions.targeting]]

@@ -9,6 +9,8 @@ import { authenticate } from "../shopify.server";
 import { formatClaimNumber, STATUS_LABELS, STATUS_TONE, type ClaimStatus } from "../lib/claims";
 import { ensureShop } from "../lib/shop.server";
 import { refreshOrderShipments } from "../lib/tracking.server";
+import { hasFeature, isPlanId } from "../lib/plan";
+import { UpgradeNotice } from "../components/Upgrade";
 import {
   SHIPMENT_FLAG_LABELS,
   STAGE_LABELS,
@@ -29,7 +31,9 @@ type View = keyof typeof VIEWS;
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  const shop = (await ensureShop(session.shop)).shop;
+  const shopRow = await ensureShop(session.shop);
+  const shop = shopRow.shop;
+  const locked = !hasFeature(isPlanId(shopRow.plan) ? shopRow.plan : null, "tracking");
   const url = new URL(request.url);
   const view = (url.searchParams.get("view") as View) in VIEWS ? (url.searchParams.get("view") as View) : "attention";
   const q = (url.searchParams.get("q") ?? "").trim().replace(/^#/, "").slice(0, 40);
@@ -62,6 +66,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ]);
   const packageCount = new Map(packages.map((p) => [p.orderId, p._count]));
   return {
+    locked,
     view,
     q,
     page,
@@ -103,6 +108,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Shipments() {
+  const d = useLoaderData<typeof loader>();
+  if (!d.locked) return <ShipmentList />;
+  return (
+    <s-page heading="Shipments">
+      <UpgradeNotice feature="tracking">
+        Follow every protected package with what the carrier last reported, and see at a glance which ones
+        weren&apos;t picked up, stalled, are late or may be lost — before the customer files a claim. Claims also
+        show the carrier data that supports or questions them.
+      </UpgradeNotice>
+    </s-page>
+  );
+}
+
+function ShipmentList() {
   const d = useLoaderData<typeof loader>();
   const [params] = useSearchParams();
   const fetcher = useFetcher<typeof action>();

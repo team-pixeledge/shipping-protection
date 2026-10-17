@@ -8,6 +8,7 @@ import { EMBED_HANDLE, embedStatus } from "../lib/embed.server";
 import { parseSettings } from "../lib/settings";
 import { ensureShop } from "../lib/shop.server";
 import { attentionCount } from "../lib/tracking.server";
+import { hasFeature, isPlanId } from "../lib/plan";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session, admin } = await authenticate.admin(request);
@@ -22,7 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { orderedAt: "desc" },
       take: 10,
     }),
-    attentionCount(shop.shop),
+    hasFeature(isPlanId(shop.plan) ? shop.plan : null, "tracking") ? attentionCount(shop.shop) : 0,
   ]);
 
   const apiKey = process.env.SHOPIFY_API_KEY || "";

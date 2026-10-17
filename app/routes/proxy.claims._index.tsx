@@ -35,6 +35,7 @@ import { parseSettings } from "../lib/settings";
 import { claimFormPage, ineligiblePage, lookupPage, statusPage, unavailablePage } from "../lib/portal-pages";
 import { proxyContext, verifiedFiles } from "../lib/proxy.server";
 import { refusalText } from "../lib/i18n";
+import { hasFeature } from "../lib/plan";
 import { clientIp, lookupAllowed } from "../lib/rate-limit.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -209,6 +210,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     settings,
     tracking,
     now,
+    plan: ctx.plan,
   });
   const claim = await createClaim({
     shop,
@@ -226,7 +228,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     locale: lang,
   });
   // Follow this order's packages from now on (it may not have bought protection).
-  await storeShipments(shop, order, (order.fulfillments ?? []) as FulfillmentNode[], tracking).catch(
+  if (hasFeature(ctx.plan, "tracking")) await storeShipments(shop, order, (order.fulfillments ?? []) as FulfillmentNode[], tracking).catch(
     (err) => console.error(`[claims] storing shipments for ${order.name}:`, err),
   );
   await notifyNewClaim(admin, claim.id);

@@ -24,6 +24,8 @@ import type { AdminGraphql } from "./setup.server";
 import { claimLocale } from "./i18n";
 import { FULFILLMENT_FIELDS, toShipment, type FulfillmentNode } from "./tracking.server";
 import type { TrackingSettings } from "./tracking";
+import { hasFeature, type PlanId } from "./plan";
+import { gateFlags } from "./gates";
 
 const numericId = (gid: string | null | undefined) => (gid ? (gid.split("/").pop() ?? null) : null);
 
@@ -223,20 +225,23 @@ export async function assessClaim(
     settings: ClaimSettings;
     tracking: TrackingSettings;
     now: Date;
+    /** The shop's plan: risk signals (and the lookups behind them) need "risk". */
+    plan: PlanId | null;
   },
 ) {
   const { shop, order } = c;
+  const risky = hasFeature(c.plan, "risk");
   const year = new Date(c.now.getTime() - 365 * 86_400_000);
   const lineItemIds = c.items.map((i) => i.lineItemId);
   const trackingNumbers = claimTrackingNumbers(order, lineItemIds);
-  const addressHash = await shippingAddressHash(admin, order.id);
+  const addressHash = risky ? await shippingAddressHash(admin, order.id) : null;
   const email = c.email.trim().toLowerCase();
   const [otherClaimsByEmail, otherClaimsByAddress, duplicate] = await Promise.all([
-    prisma.claim.count({ where: { shop, email, orderId: { not: order.id }, createdAt: { gte: year } } }),
+    risky ? prisma.claim.count({ where: { shop, email, orderId: { not: order.id }, createdAt: { gte: year } } }) : 0,
     addressHash
       ? prisma.claim.count({ where: { shop, addressHash, orderId: { not: order.id }, createdAt: { gte: year } } })
       : 0,
-    trackingNumbers.length
+    risky && trackingNumbers.length
       ? prisma.claim.findFirst({
           where: { shop, orderId: { not: order.id }, trackingNumbers: { hasSome: trackingNumbers } },
           select: { id: true },
@@ -256,7 +261,7 @@ export async function assessClaim(
     duplicateTracking: !!duplicate,
     now: c.now,
   });
-  return { flags, trackingNumbers, addressHash };
+  return { flags: gateFlags(flags, c.plan), trackingNumbers, addressHash };
 }
 
 // ---- Links ----

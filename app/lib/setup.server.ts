@@ -16,6 +16,7 @@ import { buildLadder, toMinor, type ProtectionConfig } from "../../shared/pricin
 import { currencyDecimals, parseSettings } from "./settings";
 import { applyMarketPrices, listMarkets, planMarketPrices, type PlannedMarketPrice } from "./markets.server";
 import { setTransformConfig, syncCartTransform } from "./cart-transform.server";
+import { hasFeature, isPlanId } from "./plan";
 
 export interface AdminGraphql {
   graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response>;
@@ -425,6 +426,10 @@ async function ensureOrderMetafieldDefinition(admin: AdminGraphql) {
 export async function syncProtection(admin: AdminGraphql, shop: string) {
   const row = await prisma.shop.findUniqueOrThrow({ where: { shop } });
   const settings = parseSettings(row.settings);
+  // Pro features only on Pro; settings stay stored for an upgrade later.
+  const plan = isPlanId(row.plan) ? row.plan : null;
+  const marketPrices = hasFeature(plan, "marketPrices") ? settings.marketPrices : [];
+  const wantExact = hasFeature(plan, "exactPricing") && settings.exactPricing;
   try {
     const info = await gql<{ shop: { id: string; currencyCode: string } }>(
       admin,
@@ -439,7 +444,7 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
     // Market prices need the markets' currencies before the variants exist.
     let planned: PlannedMarketPrice[] = [];
     const warnings: string[] = [];
-    if (settings.marketPrices.length) {
+    if (marketPrices.length) {
       let markets;
       try {
         markets = await listMarkets(admin);
@@ -448,9 +453,9 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
           `Market prices need access to your markets — click “Allow access” under Prices by market, then save again. (${err instanceof Error ? err.message : err})`,
         );
       }
-      const plan = planMarketPrices(markets, settings.marketPrices);
-      planned = plan.planned;
-      warnings.push(...plan.warnings);
+      const p = planMarketPrices(markets, marketPrices);
+      planned = p.planned;
+      warnings.push(...p.warnings);
     }
     const extras = [...new Map(planned.map((p) => [p.label, { label: p.label, price: label(Math.max(1, toMinor(p.amount, decimals)), decimals) }])).values()];
 
@@ -458,7 +463,7 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
     const { pairs: ladder, extraIds } = await syncVariants(admin, product.id, prices, decimals, settings.taxable, extras);
     await publishToOnlineStore(admin, product.id);
     const markets = await applyMarketPrices(admin, planned, extraIds);
-    const exact = await syncCartTransform(admin, settings.exactPricing, row.cartTransformId);
+    const exact = await syncCartTransform(admin, wantExact, row.cartTransformId);
 
     const config: ProtectionConfig = {
       v: row.version,
@@ -475,6 +480,7 @@ export async function syncProtection(admin: AdminGraphql, shop: string) {
       coverage: settings.coverage,
       ...(markets.length ? { markets } : {}),
       ...(exact.active ? { exact: true } : {}),
+      ...(hasFeature(plan, "checkoutToggle") ? { checkout: true } : {}),
     };
     const value = JSON.stringify(config);
     await setInstallationConfig(admin, value, info.shop.id);

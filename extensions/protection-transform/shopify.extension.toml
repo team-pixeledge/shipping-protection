@@ -6,6 +6,7 @@ api_version = "2026-07"
 [[extensions]]
 name = "t:name"
 handle = "protection-transform"
+uid = "8c97f0d7-b52a-7d18-8e66-cb6356aea5c45592e388"
 type = "function"
 description = "t:description"
 
