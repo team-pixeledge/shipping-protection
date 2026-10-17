@@ -65,12 +65,35 @@ export const action = async ({
   // Redirects to Shopify's approval page; Shopify sends the merchant back
   // here. The current plan stays until the new one is approved, and the new
   // one replaces it straight away (no double billing).
-  return billing.request({
-    plan: PLANS[target].billingName,
-    isTest: shop.billingTest,
-    returnUrl: `https://admin.shopify.com/store/${handle}/apps/${process.env.SHOPIFY_API_KEY}/app/plan?changed=${target}`,
-  });
+  try {
+    return await billing.request({
+      plan: PLANS[target].billingName,
+      isTest: shop.billingTest,
+      returnUrl: `https://admin.shopify.com/store/${handle}/apps/${process.env.SHOPIFY_API_KEY}/app/plan?changed=${target}`,
+    });
+  } catch (err) {
+    // The approval redirect arrives as a thrown Response — let it through.
+    if (err instanceof Response) throw err;
+    // Shopify refused the charge (e.g. 403 when the app can't use the
+    // Billing API). Show its reason instead of crashing the page.
+    const reason = shopifyReason(err);
+    console.error(`[billing] subscription request failed on ${session.shop}: ${reason}`);
+    return { ok: false, error: `Shopify couldn't start the plan: ${reason}` };
+  }
 };
+
+/** The message(s) Shopify sent with a failed Admin API call. */
+function shopifyReason(err: unknown): string {
+  const body = (err as { response?: { body?: { errors?: unknown } } })?.response?.body;
+  const errors = body?.errors;
+  if (typeof errors === "string") return errors;
+  if (Array.isArray(errors)) {
+    const msgs = errors.map((e) => (e as { message?: string })?.message ?? JSON.stringify(e));
+    if (msgs.length) return msgs.join("; ");
+  }
+  if (errors) return JSON.stringify(errors);
+  return err instanceof Error ? err.message : String(err);
+}
 
 const usd = (n: number) =>
   new Intl.NumberFormat("en-US", {
