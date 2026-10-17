@@ -91,7 +91,7 @@ const day = (iso: string | null) =>
       })
     : "—";
 
-// s-page `inlineSize` and s-button `inlineSize` aren't in the React typings.
+// s-button `inlineSize` isn't in the React typings.
 const untyped = (props: Record<string, string>) => props as object;
 const FILL = untyped({ inlineSize: "fill" });
 
@@ -183,7 +183,7 @@ export default function Plan() {
   const choose = (plan: PlanId) => fetcher.submit({ plan }, { method: "POST" });
 
   return (
-    <s-page heading="Plan & pricing" {...untyped({ inlineSize: "large" })}>
+    <s-page heading="Plan & pricing">
       <div
         style={{
           display: "flex",
